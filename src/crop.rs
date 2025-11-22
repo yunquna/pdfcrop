@@ -49,7 +49,7 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         }
 
         // Determine which bounding box to use
-        let bbox = determine_bbox(pdf_data, &doc, page_num, &options)?;
+        let bbox = determine_bbox(pdf_data, &mut doc, page_num, &options)?;
 
         if options.verbose {
             eprintln!(
@@ -95,7 +95,7 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
 }
 
 /// Determine which bounding box to use for a given page
-fn determine_bbox(pdf_data: &[u8], doc: &Document, page_num: usize, options: &CropOptions) -> Result<BoundingBox> {
+fn determine_bbox(pdf_data: &[u8], doc: &mut Document, page_num: usize, options: &CropOptions) -> Result<BoundingBox> {
     // Check for page-specific override (odd/even)
     let page_number = page_num + 1; // 1-indexed for odd/even check
 
@@ -123,7 +123,7 @@ fn determine_bbox(pdf_data: &[u8], doc: &Document, page_num: usize, options: &Cr
 /// Detect bounding box using the specified method
 fn detect_bbox_with_method(
     pdf_data: &[u8],
-    doc: &Document,
+    doc: &mut Document,
     page_num: usize,
     method: crate::BBoxMethod,
     verbose: bool,

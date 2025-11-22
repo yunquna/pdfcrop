@@ -1,17 +1,17 @@
 # pdfcrop
 
-A Rust library and CLI tool for cropping PDF files with automatic bounding box detection.
+A Rust library and CLI tool for cropping PDF files with **rendering-based automatic bounding box detection**.
 
-This is a modern Rust implementation inspired by the original `pdfcrop` tool from TeX Live, designed to be both a reusable library and a command-line tool. It features pure Rust implementation with WASM compatibility in mind.
+Modern Rust reimplementation of the TeX Live `pdfcrop` tool, using actual PDF rendering to accurately detect content boundaries. Pure Rust, WASM-ready, and library-first design.
 
 ## Features
 
-- **Automatic bounding box detection** - Parses PDF content streams to find actual content boundaries
-- **Manual bbox override** - Specify exact crop regions when needed
-- **Flexible margins** - Add uniform or per-side margins (left, top, right, bottom)
-- **Page-specific options** - Different bounding boxes for odd/even pages
+- **Rendering-based bbox detection** - Renders PDF pages to detect actual visible content (like Ghostscript)
+- **Accurate and simple** - No heuristics, handles all PDF features automatically
+- **Flexible margins** - Uniform or per-side margins (left, top, right, bottom)
+- **Manual override** - Specify exact crop regions when needed
 - **Library + CLI** - Use as a Rust library or standalone command-line tool
-- **WASM-ready** - Pure Rust design enables future web applications
+- **Pure Rust** - No external dependencies, WASM-compatible
 
 ## Quick Start
 
@@ -89,40 +89,36 @@ cargo fmt
 
 See [CLAUDE.local.md](CLAUDE.local.md) for detailed architecture and development guide.
 
+## How It Works
+
+pdfcrop uses **rendering-based detection** (like Ghostscript):
+1. Renders each PDF page to a bitmap using [hayro](https://github.com/LaurenzV/hayro)
+2. Scans pixels to find the bounding box of non-white content
+3. Converts pixel coordinates back to PDF points
+4. Applies margins and sets the CropBox
+
+This approach is simple, accurate, and automatically handles annotations, rotated text, transformed graphics, and all PDF features.
+
 ## Dependencies
 
-- **lopdf** - PDF parsing and manipulation
-- **clap** - CLI argument parsing
-- **thiserror** - Error handling
-- **anyhow** - CLI error context
+- **lopdf** - PDF manipulation
+- **hayro** - Pure Rust PDF rendering
+- **clap** - CLI parsing
+- **thiserror/anyhow** - Error handling
 
 All dependencies are pure Rust and WASM-compatible.
-
-## License
-
-MIT OR Apache-2.0
 
 ## Comparison with Original pdfcrop
 
 | Feature | Original (TeX Live) | This (Rust) |
 |---------|-------------------|-------------|
 | Language | Perl | Rust |
-| Bbox detection | Ghostscript | Content stream parsing |
-| Dependencies | Ghostscript, TeX | None (pure Rust) |
-| WASM support | No | Yes (designed for it) |
+| Bbox detection | Ghostscript (rendering) | hayro (rendering) |
+| External dependencies | Ghostscript required | None |
+| WASM support | No | Yes |
 | Library API | No | Yes |
-| Performance | Fast | Fast |
-| Margin support | ✓ | ✓ |
-| Bbox override | ✓ | ✓ |
-| Odd/even pages | ✓ | ✓ |
+| Accuracy | Excellent | Excellent (matches Ghostscript) |
 
-## Contributing
+## License
 
-Contributions welcome! This project is in active development.
-
-Areas for improvement:
-- More PDF operators in content stream parser
-- Image bbox detection
-- Hi-res bbox support
-- PDF version preservation
-- Streaming support for large files
+MIT OR Apache-2.0

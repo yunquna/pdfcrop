@@ -2,10 +2,11 @@
 name = "pdfcrop"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.86"
 authors = ["Teddy van Jerry <me@teddy-van-jerry.org>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/pdfcrop/pdfcrop"
-description = "PDF cropping library and command-line tool"
+description = "PDF cropping library and command-line tool with rendering-based bbox detection"
 keywords = ["pdf", "crop", "margin", "bbox", "cli"]
 categories = ["multimedia", "parsing", "command-line-utilities"]
 
@@ -25,6 +26,10 @@ lopdf = "0.38"
 thiserror = "2.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
+# Rendering-based bbox detection
+hayro = "0.4"
+hayro-interpret = "0.4"
+vello_cpu = { git = "https://github.com/linebender/vello", rev = "9ae9a530", default-features = false, features = ["std", "png"] }
 
 [features]
 default = ["std"]
