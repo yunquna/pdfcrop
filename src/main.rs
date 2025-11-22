@@ -55,6 +55,18 @@ struct Args {
     /// Enable debug output
     #[arg(long, short)]
     debug: bool,
+
+    /// Add clipping path for manually specified bboxes (ensures content outside is not rendered)
+    /// Note: Only applies to manual bbox (--bbox/--bbox-odd/--bbox-even), not auto-detected.
+    /// Auto-detected bboxes skip clipping (fast track) since they already match content.
+    /// Increases file size slightly by adding clipping code.
+    #[arg(long)]
+    clip: bool,
+
+    /// Shrink manual bbox to actual content (auto-detect within specified region)
+    /// Useful for removing remaining margins within a manually specified bbox
+    #[arg(long)]
+    shrink_to_content: bool,
 }
 
 fn main() -> Result<()> {
@@ -152,6 +164,8 @@ fn main() -> Result<()> {
         bbox_even,
         bbox_method: pdfcrop::BBoxMethod::ContentStream, // Pure Rust, WASM-compatible
         verbose: args.verbose || args.debug,
+        clip_content: args.clip,  // Opt-in to content clipping
+        shrink_to_content: args.shrink_to_content,
     };
 
     // Perform the crop

@@ -32,6 +32,12 @@ pdfcrop --verbose input.pdf output.pdf
 
 # Custom bbox
 pdfcrop --bbox "50 50 500 700" input.pdf output.pdf
+
+# Add content clipping (adds clipping path to stream - increases file size)
+pdfcrop --clip input.pdf output.pdf
+
+# Auto-shrink manual bbox to actual content (removes remaining margins)
+pdfcrop --bbox "0 0 612 792" --shrink-to-content input.pdf output.pdf
 ```
 
 ### Library Usage
@@ -98,6 +104,35 @@ pdfcrop uses **rendering-based detection** (like Ghostscript):
 4. Applies margins and sets the CropBox
 
 This approach is simple, accurate, and automatically handles annotations, rotated text, transformed graphics, and all PDF features.
+
+### File Size Behavior
+
+**By default**, pdfcrop only sets the PDF's CropBox:
+- Standard PDF cropping method
+- All viewers respect CropBox and hide content outside it
+- File size may increase slightly (~2-20%) due to PDF rewriting
+- Original content remains in file but is hidden
+
+**With `--clip` flag**, adds a clipping path when manually specifying bbox:
+- **Fast track:** Auto-detected bboxes skip clipping (no content outside detected bounds)
+- Only applies to manual bbox specifications (`--bbox`, `--bbox-odd`, `--bbox-even`)
+- Ensures content outside bbox is never rendered
+- Useful for security/privacy when cropping to manual regions
+- **Increases file size** slightly as it adds clipping code
+- Note: `--shrink-to-content` also skips clipping (uses detected content)
+
+### Shrink-to-Content
+
+When you specify a manual bounding box, use `--shrink-to-content` to:
+- Automatically detect the actual content within your specified region
+- Remove remaining margins inside the manual bbox
+- Useful when you know the general area but want precise cropping
+
+**Example:**
+```bash
+# Specify full page, let it shrink to actual content
+pdfcrop --bbox "0 0 612 792" --shrink-to-content input.pdf output.pdf
+```
 
 ## Dependencies
 

@@ -71,6 +71,17 @@ pub struct CropOptions {
 
     /// Enable verbose output (for debugging)
     pub verbose: bool,
+
+    /// Clip content outside the crop box by adding a clipping path to the content stream
+    /// When enabled, adds clipping commands to ensure content outside bbox is not rendered
+    /// Note: This increases file size as it adds code without removing content (default: false)
+    /// Most PDF viewers respect CropBox without needing explicit clipping
+    pub clip_content: bool,
+
+    /// When a manual bbox is specified, automatically shrink it to the actual content bounds
+    /// This detects the real content within the specified bbox and uses that instead
+    /// Useful for removing remaining margins within a manually specified region (default: false)
+    pub shrink_to_content: bool,
 }
 
 impl Default for CropOptions {
@@ -82,6 +93,8 @@ impl Default for CropOptions {
             bbox_even: None,
             bbox_method: BBoxMethod::ContentStream, // Pure Rust, WASM-compatible by default
             verbose: false,
+            clip_content: false,  // Default: only set CropBox (standard PDF cropping behavior)
+            shrink_to_content: false,  // Default: don't auto-shrink manual bbox
         }
     }
 }
