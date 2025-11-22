@@ -1281,6 +1281,7 @@ dependencies = [
  "hayro",
  "hayro-interpret",
  "lopdf",
+ "rayon",
  "reqwest",
  "shapdf",
  "thiserror",

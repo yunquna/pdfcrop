@@ -97,13 +97,13 @@ See [CLAUDE.local.md](CLAUDE.local.md) for detailed architecture and development
 
 ## How It Works
 
-pdfcrop uses **rendering-based detection** (like Ghostscript):
-1. Renders each PDF page to a bitmap using [hayro](https://github.com/LaurenzV/hayro)
+pdfcrop uses **rendering-based detection** with **parallel processing**:
+1. Renders PDF pages to bitmaps in parallel using [hayro](https://github.com/LaurenzV/hayro) and [rayon](https://github.com/rayon-rs/rayon)
 2. Scans pixels to find the bounding box of non-white content
 3. Converts pixel coordinates back to PDF points
 4. Applies margins and sets the CropBox
 
-This approach is simple, accurate, and automatically handles annotations, rotated text, transformed graphics, and all PDF features.
+This approach is simple, accurate, and automatically handles annotations, rotated text, transformed graphics, and all PDF features. **Multi-page PDFs are processed in parallel** for optimal performance.
 
 ### File Size Behavior
 
@@ -138,6 +138,7 @@ pdfcrop --bbox "0 0 612 792" --shrink-to-content input.pdf output.pdf
 
 - **lopdf** - PDF manipulation
 - **hayro** - Pure Rust PDF rendering
+- **rayon** - Parallel processing for multi-page PDFs
 - **clap** - CLI parsing
 - **thiserror/anyhow** - Error handling
 

@@ -33,6 +33,8 @@ use lopdf::Document;
 /// # }
 /// ```
 pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
+    use rayon::prelude::*;
+
     // Load the PDF document
     let mut doc = Document::load_mem(pdf_data)?;
 
@@ -42,57 +44,72 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         eprintln!("Processing {} pages", page_count);
     }
 
-    // Process each page
-    for page_num in 0..page_count {
-        if options.verbose {
-            eprintln!("Processing page {}/{}", page_num + 1, page_count);
-        }
+    // Phase 1: Detect all bboxes in parallel (read-only operations on pdf_data)
+    // This is the expensive part (rendering), so parallelizing gives major speedup
+    let bbox_results: Vec<_> = (0..page_count)
+        .into_par_iter()  // Rayon parallel iterator
+        .map(|page_num| {
+            if options.verbose {
+                eprintln!("Processing page {}/{}", page_num + 1, page_count);
+            }
 
-        // Determine which bounding box to use and whether it was manually specified
-        let (bbox, is_manual) = determine_bbox_with_source(pdf_data, &mut doc, page_num, &options)?;
+            // Determine which bounding box to use and whether it was manually specified
+            // This uses pdf_data directly without re-serializing, and can run in parallel
+            let (bbox, is_manual) = determine_bbox_with_source_parallel(
+                pdf_data,
+                &doc,  // Read-only access for page dimensions
+                page_num,
+                &options,
+            )?;
 
-        if options.verbose {
-            eprintln!(
-                "  Detected bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
-                bbox.left, bbox.bottom, bbox.right, bbox.top
-            );
-            eprintln!("  Size: {:.2} x {:.2} pts", bbox.width(), bbox.height());
-        }
+            if options.verbose {
+                eprintln!(
+                    "  Detected bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                    bbox.left, bbox.bottom, bbox.right, bbox.top
+                );
+                eprintln!("  Size: {:.2} x {:.2} pts", bbox.width(), bbox.height());
+            }
 
-        // Apply margins
-        let bbox_with_margins = bbox.with_margins(&options.margins);
+            // Apply margins
+            let bbox_with_margins = bbox.with_margins(&options.margins);
 
-        if options.verbose {
-            eprintln!(
-                "  With margins: ({:.2}, {:.2}, {:.2}, {:.2})",
-                bbox_with_margins.left,
-                bbox_with_margins.bottom,
-                bbox_with_margins.right,
-                bbox_with_margins.top
-            );
-        }
+            if options.verbose {
+                eprintln!(
+                    "  With margins: ({:.2}, {:.2}, {:.2}, {:.2})",
+                    bbox_with_margins.left,
+                    bbox_with_margins.bottom,
+                    bbox_with_margins.right,
+                    bbox_with_margins.top
+                );
+            }
 
-        // Clamp to page dimensions
-        let (page_width, page_height) = get_page_dimensions(&doc, page_num)?;
-        let final_bbox = bbox_with_margins.clamp_to_page(page_width, page_height);
+            // Clamp to page dimensions (read-only operation)
+            let (page_width, page_height) = get_page_dimensions(&doc, page_num)?;
+            let final_bbox = bbox_with_margins.clamp_to_page(page_width, page_height);
 
-        if options.verbose {
-            eprintln!(
-                "  Final bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
-                final_bbox.left, final_bbox.bottom, final_bbox.right, final_bbox.top
-            );
-        }
+            if options.verbose {
+                eprintln!(
+                    "  Final bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                    final_bbox.left, final_bbox.bottom, final_bbox.right, final_bbox.top
+                );
+            }
 
+            Ok((final_bbox, is_manual))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Phase 2: Apply cropboxes sequentially (mutates document, must be sequential)
+    for (page_num, (final_bbox, is_manual)) in bbox_results.iter().enumerate() {
         // Fast track: Only clip content if bbox was manually specified AND clipping is enabled
         // Auto-detected bboxes don't need clipping since they already match the content
-        let should_clip = options.clip_content && is_manual;
+        let should_clip = options.clip_content && *is_manual;
 
         if options.verbose && options.clip_content && !is_manual {
             eprintln!("  Skipping clipping (auto-detected bbox - fast track)");
         }
 
         // Apply the crop box (with optional content clipping)
-        apply_cropbox(&mut doc, page_num, &final_bbox, should_clip)?;
+        apply_cropbox(&mut doc, page_num, final_bbox, should_clip)?;
     }
 
     // Save the document to bytes
@@ -103,8 +120,71 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
 }
 
 /// Determine which bounding box to use for a given page, and whether it was manually specified
+/// (Parallel-safe version that uses pdf_data directly without re-serialization)
 ///
 /// Returns (bbox, is_manual) where is_manual is true if the bbox came from a manual override
+fn determine_bbox_with_source_parallel(
+    pdf_data: &[u8],
+    doc: &Document,  // Read-only reference (thread-safe)
+    page_num: usize,
+    options: &CropOptions,
+) -> Result<(BoundingBox, bool)> {
+    // Check for page-specific override (odd/even)
+    let page_number = page_num + 1; // 1-indexed for odd/even check
+
+    let manual_bbox = if page_number % 2 == 1 {
+        // Odd page
+        options.bbox_odd
+    } else {
+        // Even page
+        options.bbox_even
+    }.or(options.bbox_override); // Fall back to global override
+
+    // If we have a manual bbox and shrink_to_content is enabled, detect content within it
+    if let Some(bbox) = manual_bbox {
+        if options.shrink_to_content {
+            if options.verbose {
+                eprintln!("  Manual bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                         bbox.left, bbox.bottom, bbox.right, bbox.top);
+                eprintln!("  Detecting actual content within manual bbox...");
+            }
+
+            // Detect content within the manual bbox region
+            // Even though we shrink it, it's still based on a manual specification
+            match detect_bbox_within_region(pdf_data, page_num, &bbox, options.verbose) {
+                Ok(detected_bbox) => {
+                    if options.verbose {
+                        eprintln!("  Shrunk to actual content: ({:.2}, {:.2}, {:.2}, {:.2})",
+                                 detected_bbox.left, detected_bbox.bottom,
+                                 detected_bbox.right, detected_bbox.top);
+                    }
+                    // Return with is_manual=false since we detected actual content
+                    return Ok((detected_bbox, false));
+                }
+                Err(e) => {
+                    if options.verbose {
+                        eprintln!("  Warning: Could not detect content within bbox ({}), using manual bbox", e);
+                    }
+                    // Return manual bbox with is_manual=true
+                    return Ok((bbox, true));
+                }
+            }
+        } else {
+            // Manual bbox without shrinking - return with is_manual=true
+            return Ok((bbox, true));
+        }
+    }
+
+    // Auto-detect bbox using specified method - use pdf_data directly for efficiency
+    let bbox = detect_bbox_with_method_parallel(pdf_data, doc, page_num, options.bbox_method, options.verbose)?;
+    Ok((bbox, false))
+}
+
+/// Determine which bounding box to use for a given page, and whether it was manually specified
+/// (Legacy version for compatibility - kept for reference)
+///
+/// Returns (bbox, is_manual) where is_manual is true if the bbox came from a manual override
+#[allow(dead_code)]
 fn determine_bbox_with_source(
     pdf_data: &[u8],
     doc: &mut Document,
@@ -252,7 +332,48 @@ fn detect_bbox_within_region(
     BoundingBox::new(left, bottom, right, top)
 }
 
-/// Detect bounding box using the specified method
+/// Detect bounding box using the specified method (parallel-safe version using pdf_data directly)
+fn detect_bbox_with_method_parallel(
+    pdf_data: &[u8],
+    _doc: &Document,  // Not used, but kept for potential future use
+    page_num: usize,
+    method: crate::BBoxMethod,
+    verbose: bool,
+) -> Result<BoundingBox> {
+    use crate::BBoxMethod;
+    use crate::bbox::detect_bbox_by_rendering;
+
+    match method {
+        BBoxMethod::Ghostscript => {
+            crate::ghostscript::detect_bbox_gs(pdf_data, page_num)
+        }
+        BBoxMethod::ContentStream => {
+            // Use rendering-based detection directly on pdf_data (no re-serialization needed!)
+            detect_bbox_by_rendering(pdf_data, page_num, Some(72.0))
+        }
+        BBoxMethod::Auto => {
+            // Try Ghostscript first
+            match crate::ghostscript::detect_bbox_gs(pdf_data, page_num) {
+                Ok(bbox) => {
+                    if verbose {
+                        eprintln!("  BBox method: Ghostscript");
+                    }
+                    Ok(bbox)
+                }
+                Err(e) => {
+                    if verbose {
+                        eprintln!("  Ghostscript unavailable ({}), using rendering-based detection", e);
+                    }
+                    // Use rendering-based detection directly on pdf_data
+                    detect_bbox_by_rendering(pdf_data, page_num, Some(72.0))
+                }
+            }
+        }
+    }
+}
+
+/// Detect bounding box using the specified method (legacy version for compatibility)
+#[allow(dead_code)]
 fn detect_bbox_with_method(
     pdf_data: &[u8],
     doc: &mut Document,
