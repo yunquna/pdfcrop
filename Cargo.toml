@@ -1,0 +1,35 @@
+[package]
+name = "pdfcrop"
+version = "0.1.0"
+edition = "2021"
+authors = ["Teddy van Jerry <me@teddy-van-jerry.org>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pdfcrop/pdfcrop"
+description = "PDF cropping library and command-line tool"
+keywords = ["pdf", "crop", "margin", "bbox", "cli"]
+categories = ["multimedia", "parsing", "command-line-utilities"]
+
+# Library configuration
+[lib]
+name = "pdfcrop"
+path = "src/lib.rs"
+crate-type = ["rlib", "cdylib"]  # rlib for Rust, cdylib for WASM
+
+# Binary configuration
+[[bin]]
+name = "pdfcrop"
+path = "src/main.rs"
+
+[dependencies]
+lopdf = "0.38"
+thiserror = "2.0"
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+
+[features]
+default = ["std"]
+std = []
+
+[dev-dependencies]
+shapdf = "0.2"  # Generate test PDF files with shapes
+reqwest = { version = "0.12", features = ["blocking"] }  # HTTP client for downloading PDFs
