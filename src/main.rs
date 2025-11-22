@@ -162,6 +162,8 @@ fn main() -> Result<()> {
         bbox_override,
         bbox_odd,
         bbox_even,
+        page_bboxes: None,  // Per-page bbox (not exposed in CLI yet)
+        page_range: None,   // Page range selection (not exposed in CLI yet)
         bbox_method: pdfcrop::BBoxMethod::ContentStream, // Pure Rust, WASM-compatible
         verbose: args.verbose || args.debug,
         clip_content: args.clip,  // Opt-in to content clipping

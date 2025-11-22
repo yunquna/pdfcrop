@@ -26,15 +26,35 @@ lopdf = "0.38"
 thiserror = "2.0"
 anyhow = "1.0"
 clap = { version = "4.5", features = ["derive"] }
-rayon = "1.10"  # Parallel processing for multi-page PDFs
+# Parallel processing for multi-page PDFs (optional for WASM compatibility)
+rayon = { version = "1.10", optional = true }
 # Rendering-based bbox detection
 hayro = "0.4"
 hayro-interpret = "0.4"
 vello_cpu = { git = "https://github.com/linebender/vello", rev = "9ae9a530", default-features = false, features = ["std", "png"] }
 
+# WASM-specific dependencies
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+wasm-bindgen = "0.2"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "File",
+    "Url",
+    "Window",
+    "HtmlCanvasElement",
+    "CanvasRenderingContext2d",
+] }
+getrandom = { version = "0.3", features = ["wasm_js"] }
+console_error_panic_hook = "0.1"  # Better panic messages in browser console
+wasm-logger = "0.2"  # Logging support in browser console
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
 [features]
-default = ["std"]
+default = ["std", "parallel"]
 std = []
+parallel = ["rayon"]  # Enable parallel processing (requires rayon)
+wasm-parallel = ["parallel", "wasm-bindgen-rayon"]  # Parallel processing in WASM
 
 [dev-dependencies]
 shapdf = "0.2"  # Generate test PDF files with shapes
