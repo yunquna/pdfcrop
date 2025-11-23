@@ -33,10 +33,25 @@ use lopdf::Document;
 /// # }
 /// ```
 pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
+    // Debug logging at the very start
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        web_sys::console::log_1(&JsValue::from_str("[DEBUG] crop_pdf called"));
+        web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] page_range: {:?}", options.page_range)));
+        web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] shrink_to_content: {}", options.shrink_to_content)));
+    }
+
     // Load the PDF document
     let mut doc = Document::load_mem(pdf_data)?;
 
     let page_count = get_page_count(&doc);
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Total pages in document: {}", page_count)));
+    }
 
     // Determine which pages to process based on page_range option
     let pages_to_process: Vec<usize> = if let Some(ref range) = options.page_range {
@@ -85,12 +100,93 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         // Auto-detected bboxes don't need clipping since they already match the content
         let should_clip = options.clip_content && *is_manual;
 
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsValue;
+            if options.clip_content {
+                if *is_manual {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[DEBUG] Page {}: Applying content clipping (manual bbox)",
+                        page_num + 1
+                    )));
+                } else {
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[DEBUG] Page {}: Skipping clipping (auto-detected bbox - already tight)",
+                        page_num + 1
+                    )));
+                }
+            }
+        }
+
         if options.verbose && options.clip_content && !is_manual {
             eprintln!("  Skipping clipping (auto-detected bbox - fast track)");
         }
 
         // Apply the crop box (with optional content clipping)
         apply_cropbox(&mut doc, *page_num, final_bbox, should_clip)?;
+    }
+
+    // Phase 3: Remove pages that weren't in the page range (if page range was specified)
+    if let Some(ref _range) = options.page_range {
+        // Get all page numbers (0-indexed)
+        let all_pages: Vec<usize> = (0..page_count).collect();
+
+        // Find pages to remove (pages NOT in the range, 0-indexed)
+        let pages_to_remove: Vec<u32> = all_pages
+            .iter()
+            .filter(|&&p| !pages_to_process.contains(&p))
+            .map(|&p| (p + 1) as u32)  // Convert to 1-indexed for lopdf
+            .collect();
+
+        if !pages_to_remove.is_empty() {
+            // Always log for debugging (even without verbose)
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Removing {} pages not in range: {:?}", pages_to_remove.len(), pages_to_remove)));
+                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Pages to keep (0-indexed): {:?}", pages_to_process)));
+                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Page count before deletion: {}", page_count)));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!("[DEBUG] Removing {} pages not in range: {:?}", pages_to_remove.len(), pages_to_remove);
+                eprintln!("[DEBUG] Pages to keep (0-indexed): {:?}", pages_to_process);
+                eprintln!("[DEBUG] Page count before deletion: {}", page_count);
+            }
+
+            // Delete all pages not in range in one call (uses 1-indexed page numbers)
+            doc.delete_pages(&pages_to_remove);
+
+            let new_count = get_page_count(&doc);
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Page count after deletion: {}", new_count)));
+                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Cleaning up unused objects..."));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!("[DEBUG] Page count after deletion: {}", new_count);
+                eprintln!("[DEBUG] Cleaning up unused objects...");
+            }
+
+            // Clean up unused objects to reduce file size
+            doc.delete_zero_length_streams();  // Remove empty streams
+            doc.prune_objects();               // Remove unused objects
+            doc.renumber_objects();            // Reorganize object IDs
+            doc.compress();                    // Compress stream objects
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Cleanup complete"));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                eprintln!("[DEBUG] Cleanup complete");
+            }
+        }
     }
 
     // Save the document to bytes
@@ -170,9 +266,56 @@ fn determine_bbox_with_source_parallel(
     // Check for per-page bbox override first (highest priority)
     if let Some(ref page_bboxes) = options.page_bboxes {
         if let Some(&bbox) = page_bboxes.get(&page_num) {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[DEBUG] Per-page bbox for page {}: ({:.2}, {:.2}, {:.2}, {:.2}), shrink_to_content: {}",
+                    page_num + 1, bbox.left, bbox.bottom, bbox.right, bbox.top, options.shrink_to_content
+                )));
+            }
+
             if options.verbose {
                 eprintln!("  Using per-page bbox for page {}", page_num + 1);
             }
+
+            // Apply shrink_to_content if enabled for per-page bboxes too
+            if options.shrink_to_content {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use wasm_bindgen::JsValue;
+                    web_sys::console::log_1(&JsValue::from_str("[DEBUG] Shrinking per-page bbox to actual content..."));
+                }
+
+                match detect_bbox_within_region(pdf_data, page_num, &bbox, options.verbose) {
+                    Ok(detected_bbox) => {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use wasm_bindgen::JsValue;
+                            web_sys::console::log_1(&JsValue::from_str(&format!(
+                                "[DEBUG] Shrunk to: ({:.2}, {:.2}, {:.2}, {:.2})",
+                                detected_bbox.left, detected_bbox.bottom,
+                                detected_bbox.right, detected_bbox.top
+                            )));
+                        }
+                        // Return with is_manual=false since we detected actual content
+                        return Ok((detected_bbox, false));
+                    }
+                    Err(e) => {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use wasm_bindgen::JsValue;
+                            web_sys::console::log_1(&JsValue::from_str(&format!(
+                                "[DEBUG] Could not shrink: {}, using manual bbox",
+                                e
+                            )));
+                        }
+                        // Return manual bbox with is_manual=true
+                        return Ok((bbox, true));
+                    }
+                }
+            }
+
             return Ok((bbox, true));
         }
     }
@@ -190,6 +333,15 @@ fn determine_bbox_with_source_parallel(
 
     // If we have a manual bbox and shrink_to_content is enabled, detect content within it
     if let Some(bbox) = manual_bbox {
+        #[cfg(target_arch = "wasm32")]
+        {
+            use wasm_bindgen::JsValue;
+            web_sys::console::log_1(&JsValue::from_str(&format!(
+                "[DEBUG] Manual bbox for page {}: ({:.2}, {:.2}, {:.2}, {:.2}), shrink_to_content: {}",
+                page_num + 1, bbox.left, bbox.bottom, bbox.right, bbox.top, options.shrink_to_content
+            )));
+        }
+
         if options.shrink_to_content {
             if options.verbose {
                 eprintln!("  Manual bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
@@ -197,10 +349,26 @@ fn determine_bbox_with_source_parallel(
                 eprintln!("  Detecting actual content within manual bbox...");
             }
 
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Shrinking manual bbox to actual content..."));
+            }
+
             // Detect content within the manual bbox region
             // Even though we shrink it, it's still based on a manual specification
             match detect_bbox_within_region(pdf_data, page_num, &bbox, options.verbose) {
                 Ok(detected_bbox) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        use wasm_bindgen::JsValue;
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "[DEBUG] Shrunk to: ({:.2}, {:.2}, {:.2}, {:.2})",
+                            detected_bbox.left, detected_bbox.bottom,
+                            detected_bbox.right, detected_bbox.top
+                        )));
+                    }
+
                     if options.verbose {
                         eprintln!("  Shrunk to actual content: ({:.2}, {:.2}, {:.2}, {:.2})",
                                  detected_bbox.left, detected_bbox.bottom,
@@ -210,6 +378,15 @@ fn determine_bbox_with_source_parallel(
                     return Ok((detected_bbox, false));
                 }
                 Err(e) => {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        use wasm_bindgen::JsValue;
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "[DEBUG] Could not shrink bbox: {}, using manual bbox",
+                            e
+                        )));
+                    }
+
                     if options.verbose {
                         eprintln!("  Warning: Could not detect content within bbox ({}), using manual bbox", e);
                     }
@@ -218,9 +395,24 @@ fn determine_bbox_with_source_parallel(
                 }
             }
         } else {
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Using manual bbox without shrinking"));
+            }
+
             // Manual bbox without shrinking - return with is_manual=true
             return Ok((bbox, true));
         }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[DEBUG] No manual bbox for page {}, auto-detecting content",
+            page_num + 1
+        )));
     }
 
     // Auto-detect bbox using specified method - use pdf_data directly for efficiency

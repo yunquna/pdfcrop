@@ -146,7 +146,10 @@ pub fn crop_pdf_wasm(
         for i in 0..entries.length() {
             let entry = entries.get(i);
             let pair = js_sys::Array::from(&entry);
-            let page_num = pair.get(0).as_f64().ok_or("Invalid page number")? as usize;
+            // Parse page number from string key (Object keys are always strings in JS)
+            let page_num_str = pair.get(0).as_string().ok_or("Invalid page number")?;
+            let page_num = page_num_str.parse::<usize>()
+                .map_err(|_| JsValue::from_str("Invalid page number"))?;
             let bbox_obj = pair.get(1);
 
             // Extract bbox fields from JS object

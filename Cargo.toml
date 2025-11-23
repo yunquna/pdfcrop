@@ -44,6 +44,7 @@ web-sys = { version = "0.3", features = [
     "Window",
     "HtmlCanvasElement",
     "CanvasRenderingContext2d",
+    "console",
 ] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
 console_error_panic_hook = "0.1"  # Better panic messages in browser console
