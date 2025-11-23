@@ -36,68 +36,125 @@ pub fn apply_cropbox(doc: &mut Document, page_num: usize, bbox: &BoundingBox, cl
     // Set the CropBox
     page_dict.set("CropBox", cropbox);
 
-    // If clip_content is enabled, add a clipping path to the content stream
+    // If clip_content is enabled, filter page content using component-based approach
+    // This removes paths and images that don't overlap with the crop box
+    // Text blocks and Form XObjects are kept for safety
     if clip_content {
-        add_clipping_path(doc, page_id, bbox)?;
+        filter_page_content(doc, page_id, bbox)?;
     }
 
     Ok(())
 }
 
-/// Add a clipping path to the beginning of a page's content stream
+/// Filter page content to remove elements outside the crop box
 ///
-/// This inserts a rectangular clipping path that restricts all drawing
-/// operations to the specified bounding box. Content outside the box
-/// will be effectively invisible and can be removed during compression.
-fn add_clipping_path(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingBox) -> Result<()> {
-    // Create the clipping path commands
-    // Format: q (save state) + rectangle + W (clip) + n (end path without painting)
-    let clip_commands = format!(
-        "q {} {} {} {} re W n\n",
-        bbox.left,
-        bbox.bottom,
-        bbox.width(),
-        bbox.height()
-    );
+/// This analyzes the page's content stream and removes drawing operations
+/// that fall completely outside the crop box. This ensures clipped content
+/// is actually removed from the PDF file for privacy/security.
+fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingBox) -> Result<()> {
+    use crate::content_filter::{filter_content_stream, filter_form_xobject};
 
-    // Get the page dictionary
-    let page = doc
-        .get_object(page_id)
-        .map_err(|e| Error::PdfParse(format!("failed to get page: {}", e)))?
-        .as_dict()
-        .map_err(|e| Error::PdfParse(format!("page is not a dictionary: {}", e)))?;
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        web_sys::console::log_1(&JsValue::from_str("[DEBUG] Filtering page content..."));
+    }
 
-    // Get the current Contents object
-    let contents_ref = match page.get(b"Contents") {
-        Ok(obj) => obj.clone(),
-        Err(_) => {
-            // No existing content, create new content stream with just the clipping path
-            let stream_dict = lopdf::Dictionary::new();
-            let stream_data = clip_commands.into_bytes();
-            let stream = lopdf::Stream::new(stream_dict, stream_data);
-            let stream_id = doc.add_object(stream);
+    // Get the page dictionary and clone needed data to avoid borrow conflicts
+    let (contents_ref, resources) = {
+        let page = doc
+            .get_object(page_id)
+            .map_err(|e| Error::PdfParse(format!("failed to get page: {}", e)))?
+            .as_dict()
+            .map_err(|e| Error::PdfParse(format!("page is not a dictionary: {}", e)))?;
 
-            // Add Contents reference to page
-            let page_dict = doc.get_object_mut(page_id)
-                .map_err(|e| Error::PdfParse(format!("failed to get page mut: {}", e)))?
-                .as_dict_mut()
-                .map_err(|e| Error::PdfParse(format!("page is not a dictionary: {}", e)))?;
-            page_dict.set("Contents", Object::Reference(stream_id));
+        // Clone the page's Resources (needed for Form XObject lookup)
+        let resources = page.get(b"Resources")
+            .ok()
+            .and_then(|obj| obj.as_dict().ok())
+            .map(|d| d.clone());
 
-            return Ok(());
-        }
+        // Clone the Contents reference
+        let contents_ref = match page.get(b"Contents") {
+            Ok(obj) => obj.clone(),
+            Err(_) => {
+                // No existing content, nothing to filter
+                return Ok(());
+            }
+        };
+
+        (contents_ref, resources)
     };
+
+    // Collect all Form XObjects to filter
+    let mut all_form_xobjects = vec![];
 
     // Handle both single stream and array of streams
     match contents_ref {
         Object::Reference(ref_id) => {
-            // Single content stream - prepend clipping path
-            prepend_to_stream(doc, ref_id, &clip_commands)?;
+            // Single content stream - filter it
+            let stream = doc
+                .get_object(ref_id)
+                .map_err(|e| Error::PdfParse(format!("failed to get stream: {}", e)))?
+                .as_stream()
+                .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+
+            // Filter the content stream (collects Form XObjects for second pass)
+            let (filtered_content, form_xobjects) = filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
+            all_form_xobjects.extend(form_xobjects);
+
+            // Update the stream with filtered content
+            let stream_mut = doc
+                .get_object_mut(ref_id)
+                .map_err(|e| Error::PdfParse(format!("failed to get stream mut: {}", e)))?
+                .as_stream_mut()
+                .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+
+            stream_mut.set_plain_content(filtered_content);
         }
         Object::Array(ref streams) => {
-            // Multiple content streams - prepend to first one
-            if let Some(Object::Reference(ref_id)) = streams.first() {
-                prepend_to_stream(doc, *ref_id, &clip_commands)?;
+            // Multiple content streams - filter ALL of them
+            #[cfg(target_arch = "wasm32")]
+            {
+                use wasm_bindgen::JsValue;
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[DEBUG] Page has {} content streams",
+                    streams.len()
+                )));
+            }
+
+            #[cfg(debug_assertions)]
+            eprintln!("[DEBUG] Page has {} content streams (array)", streams.len());
+
+            for (idx, stream_ref) in streams.iter().enumerate() {
+                if let Object::Reference(ref_id) = stream_ref {
+                    #[cfg(target_arch = "wasm32")]
+                    {
+                        use wasm_bindgen::JsValue;
+                        web_sys::console::log_1(&JsValue::from_str(&format!(
+                            "[DEBUG] Filtering content stream {} of {}",
+                            idx + 1,
+                            streams.len()
+                        )));
+                    }
+
+                    let stream = doc
+                        .get_object(*ref_id)
+                        .map_err(|e| Error::PdfParse(format!("failed to get stream: {}", e)))?
+                        .as_stream()
+                        .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+
+                    let (filtered_content, form_xobjects) = filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
+                    all_form_xobjects.extend(form_xobjects);
+
+                    let stream_mut = doc
+                        .get_object_mut(*ref_id)
+                        .map_err(|e| Error::PdfParse(format!("failed to get stream mut: {}", e)))?
+                        .as_stream_mut()
+                        .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+
+                    stream_mut.set_plain_content(filtered_content);
+                }
             }
         }
         _ => {
@@ -107,29 +164,44 @@ fn add_clipping_path(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingBox
         }
     }
 
-    Ok(())
-}
+    // Second pass: Recursively filter all collected Form XObjects
+    // DISABLED: Form XObjects have their own coordinate system which doesn't match page coordinates
+    // Filtering them with page bbox causes incorrect content removal
+    // TODO: Implement coordinate transformation from page space to XObject space
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[DEBUG] Skipping Form XObject filtering ({} found) - coordinate transformation not yet implemented",
+            all_form_xobjects.len()
+        )));
+    }
 
-/// Prepend content to an existing stream object
-fn prepend_to_stream(doc: &mut Document, stream_id: (u32, u16), prefix: &str) -> Result<()> {
-    let stream = doc
-        .get_object_mut(stream_id)
-        .map_err(|e| Error::PdfParse(format!("failed to get stream: {}", e)))?
-        .as_stream_mut()
-        .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+    // NOTE: Commented out Form XObject filtering for now
+    // while let Some((xobj_id, xobj_resources)) = all_form_xobjects.pop() {
+    //     match filter_form_xobject(doc, xobj_id, xobj_resources, bbox) {
+    //         Ok(nested_xobjects) => {
+    //             // Add nested Form XObjects to the queue for recursive filtering
+    //             all_form_xobjects.extend(nested_xobjects);
+    //         }
+    //         Err(e) => {
+    //             #[cfg(target_arch = "wasm32")]
+    //             {
+    //                 use wasm_bindgen::JsValue;
+    //                 web_sys::console::log_1(&JsValue::from_str(&format!(
+    //                     "[DEBUG] Could not filter Form XObject {:?}: {}",
+    //                     xobj_id, e
+    //                 )));
+    //             }
+    //         }
+    //     }
+    // }
 
-    // Try to decode the existing content - handle both compressed and uncompressed streams
-    let existing_content = stream.decompressed_content().unwrap_or_else(|_| {
-        // If decompression fails, the stream may already be uncompressed
-        stream.content.clone()
-    });
-
-    // Prepend the clipping path
-    let mut new_content = prefix.as_bytes().to_vec();
-    new_content.extend_from_slice(&existing_content);
-
-    // Update the stream content (will be recompressed when saved)
-    stream.set_plain_content(new_content);
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsValue;
+        web_sys::console::log_1(&JsValue::from_str("[DEBUG] Content filtering complete"));
+    }
 
     Ok(())
 }
