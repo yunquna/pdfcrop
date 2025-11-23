@@ -295,7 +295,7 @@ fn parse_type0_font(doc: &Document, font_dict: &Dictionary) -> Option<FontMetric
     let default_width = descendant_dict
         .get(b"DW")
         .ok()
-        .and_then(|obj| object_to_f64(obj))
+        .and_then(object_to_f64)
         .unwrap_or(1000.0);
 
     let mut widths = HashMap::new();
@@ -380,15 +380,15 @@ fn parse_type3_font(doc: &Document, font_dict: &Dictionary) -> Option<FontMetric
 fn descriptor_metrics(descriptor: Option<&Dictionary>) -> (f64, f64, f64) {
     let ascent = descriptor
         .and_then(|dict| dict.get(b"Ascent").ok())
-        .and_then(|obj| object_to_f64(obj))
+        .and_then(object_to_f64)
         .unwrap_or(800.0);
     let descent = descriptor
         .and_then(|dict| dict.get(b"Descent").ok())
-        .and_then(|obj| object_to_f64(obj))
+        .and_then(object_to_f64)
         .unwrap_or(-200.0);
     let missing_width = descriptor
         .and_then(|dict| dict.get(b"MissingWidth").ok())
-        .and_then(|obj| object_to_f64(obj))
+        .and_then(object_to_f64)
         .unwrap_or(500.0);
 
     (ascent, descent, missing_width)
@@ -560,14 +560,14 @@ fn parse_into_components(
     let mut graphics_state_ops: Vec<Operation> = Vec::new();
     let mut font_cache = FontCache::new();
 
-    for (op_idx, op) in operations.iter().enumerate() {
+    for (_op_idx, op) in operations.iter().enumerate() {
         let operator = op.operator.as_str();
 
         #[cfg(debug_assertions)]
         if operations.len() <= 5 {
             eprintln!(
                 "[DEBUG] Operation {}: '{}' ({} bytes) with {} operands",
-                op_idx,
+                _op_idx,
                 operator,
                 op.operator.len(),
                 op.operands.len()
@@ -617,7 +617,7 @@ fn parse_into_components(
                 // Update text state
                 match operator {
                     "Tf" => {
-                        if let Some(Object::Name(font_name)) = op.operands.get(0) {
+                        if let Some(Object::Name(font_name)) = op.operands.first() {
                             state.font_name = Some(font_name.clone());
                         }
                         if let Some(size) = extract_number(&op.operands, 1) {
@@ -900,7 +900,7 @@ fn parse_into_components(
             // Text state and font operators - track and keep
             "Tf" => {
                 // Font selection - update font size for text bbox estimation
-                if let Some(Object::Name(font_name)) = op.operands.get(0) {
+                if let Some(Object::Name(font_name)) = op.operands.first() {
                     state.font_name = Some(font_name.clone());
                 }
                 if let Some(size) = extract_number(&op.operands, 1) {
@@ -1079,14 +1079,14 @@ fn handle_orphan_text_operation(
     };
 
     let advance = match operator {
-        "Tj" => measure_text_from_string(op.operands.get(0)?, &metrics, state)?,
+        "Tj" => measure_text_from_string(op.operands.first()?, &metrics, state)?,
         "TJ" => {
-            let array = op.operands.get(0)?.as_array().ok()?;
+            let array = op.operands.first()?.as_array().ok()?;
             measure_text_from_array(array, &metrics, state)?
         }
         "'" => {
             state.move_to_next_line();
-            measure_text_from_string(op.operands.get(0)?, &metrics, state)?
+            measure_text_from_string(op.operands.first()?, &metrics, state)?
         }
         "\"" => {
             if let Some(space) = extract_number(&op.operands, 0) {
@@ -1719,7 +1719,7 @@ pub fn filter_content_stream(
                     String::from_utf8_lossy(name)
                 );
             }
-        } else if content.operations.len() > 0 {
+        } else if !content.operations.is_empty() {
             // Check if stream starts with text operators (potential issue)
             let first_op = &content.operations[0];
             if matches!(first_op.operator.as_str(), "Tj" | "TJ" | "'" | "\"") {
@@ -1866,7 +1866,7 @@ pub fn filter_content_stream(
 
 /// Get Form XObject ObjectId
 fn get_xobject_object_id(
-    doc: &Document,
+    _doc: &Document,
     resources: &Dictionary,
     xobj_name: &[u8],
 ) -> Result<ObjectId> {
@@ -1892,6 +1892,7 @@ fn get_xobject_object_id(
 
 /// Get Form XObject reference and resources for later filtering
 /// Returns (ObjectId, Option<Dictionary>) if it's a Form XObject
+#[allow(dead_code)]
 fn get_form_xobject_ref(
     doc: &Document,
     resources: &Dictionary,
@@ -1940,8 +1941,7 @@ fn get_form_xobject_ref(
         .dict
         .get(b"Resources")
         .ok()
-        .and_then(|obj| obj.as_dict().ok())
-        .map(|d| d.clone());
+        .and_then(|obj| obj.as_dict().ok()).cloned();
 
     Ok((xobj_ref, form_resources))
 }
@@ -1989,6 +1989,7 @@ pub fn filter_form_xobject(
 
 /// Filter operations based on crop box intersection
 /// Collects Form XObjects for later filtering (two-pass approach)
+#[allow(dead_code)]
 fn filter_operations(
     doc: &Document,
     operations: &[Operation],
@@ -2140,7 +2141,7 @@ fn filter_operations(
                 let keep = path_intersects_box(&current_path, crop_box);
                 if keep {
                     // Commit buffered path construction operators
-                    filtered.extend(path_ops_buffer.drain(..));
+                    filtered.append(&mut path_ops_buffer);
                     filtered.push(op.clone());
                 } else {
                     // Discard buffered path construction operators
@@ -2220,6 +2221,7 @@ fn filter_operations(
 }
 
 /// Create PDF operations for a rectangular clipping path
+#[allow(dead_code)]
 fn create_clipping_path_operations(bbox: &BoundingBox) -> Vec<lopdf::content::Operation> {
     use lopdf::content::Operation;
 
@@ -2269,6 +2271,7 @@ fn extract_number(operands: &[Object], index: usize) -> Option<f64> {
 }
 
 /// Check if a point is within or near the bounding box
+#[allow(dead_code)]
 fn is_point_near_box(point: (f64, f64), bbox: &BoundingBox, margin: f64) -> bool {
     let (x, y) = point;
     x >= bbox.left - margin
@@ -2278,6 +2281,7 @@ fn is_point_near_box(point: (f64, f64), bbox: &BoundingBox, margin: f64) -> bool
 }
 
 /// Check if a path intersects with the bounding box
+#[allow(dead_code)]
 fn path_intersects_box(path: &[(f64, f64)], bbox: &BoundingBox) -> bool {
     if path.is_empty() {
         return true; // Keep if we can't determine

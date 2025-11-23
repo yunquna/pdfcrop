@@ -49,8 +49,7 @@ pub fn detect_bbox_by_rendering(
     // Get the requested page
     let page = pdf
         .pages()
-        .iter()
-        .nth(page_num)
+        .get(page_num)
         .ok_or_else(|| Error::InvalidPage(format!("page {} not found", page_num)))?;
 
     // Render the page

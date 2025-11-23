@@ -346,13 +346,13 @@ fn determine_bbox_with_source_parallel(
                         // Still treat as manual bbox even after shrinking, so content clipping will be applied
                         return Ok((detected_bbox, true));
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         #[cfg(target_arch = "wasm32")]
                         {
                             use wasm_bindgen::JsValue;
                             web_sys::console::log_1(&JsValue::from_str(&format!(
                                 "[DEBUG] Could not shrink: {}, using manual bbox",
-                                e
+                                _e
                             )));
                         }
                         // Return manual bbox with is_manual=true

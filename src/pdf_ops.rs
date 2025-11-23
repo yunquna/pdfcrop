@@ -57,7 +57,7 @@ pub fn apply_cropbox(
 /// that fall completely outside the crop box. This ensures clipped content
 /// is actually removed from the PDF file for privacy/security.
 fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingBox) -> Result<()> {
-    use crate::content_filter::{filter_content_stream, filter_form_xobject};
+    use crate::content_filter::filter_content_stream;
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -77,8 +77,7 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
         let resources = page
             .get(b"Resources")
             .ok()
-            .and_then(|obj| obj.as_dict().ok())
-            .map(|d| d.clone());
+            .and_then(|obj| obj.as_dict().ok()).cloned();
 
         // Clone the Contents reference
         let contents_ref = match page.get(b"Contents") {
@@ -133,14 +132,14 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
             #[cfg(debug_assertions)]
             eprintln!("[DEBUG] Page has {} content streams (array)", streams.len());
 
-            for (idx, stream_ref) in streams.iter().enumerate() {
+            for (_idx, stream_ref) in streams.iter().enumerate() {
                 if let Object::Reference(ref_id) = stream_ref {
                     #[cfg(target_arch = "wasm32")]
                     {
                         use wasm_bindgen::JsValue;
                         web_sys::console::log_1(&JsValue::from_str(&format!(
                             "[DEBUG] Filtering content stream {} of {}",
-                            idx + 1,
+                            _idx + 1,
                             streams.len()
                         )));
                     }
