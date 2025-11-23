@@ -96,8 +96,8 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         let (final_bbox, is_manual) = bbox_result.as_ref()
             .map_err(|e| Error::PdfParse(format!("Failed to detect bbox for page {}: {}", page_num + 1, e)))?;
 
-        // Fast track: Only clip content if bbox was manually specified AND clipping is enabled
-        // Auto-detected bboxes don't need clipping since they already match the content
+        // Apply content filtering if enabled and bbox was manually specified
+        // Now supports recursive Form XObject filtering
         let should_clip = options.clip_content && *is_manual;
 
         #[cfg(target_arch = "wasm32")]
@@ -298,8 +298,8 @@ fn determine_bbox_with_source_parallel(
                                 detected_bbox.right, detected_bbox.top
                             )));
                         }
-                        // Return with is_manual=false since we detected actual content
-                        return Ok((detected_bbox, false));
+                        // Still treat as manual bbox even after shrinking, so content clipping will be applied
+                        return Ok((detected_bbox, true));
                     }
                     Err(e) => {
                         #[cfg(target_arch = "wasm32")]
@@ -374,8 +374,8 @@ fn determine_bbox_with_source_parallel(
                                  detected_bbox.left, detected_bbox.bottom,
                                  detected_bbox.right, detected_bbox.top);
                     }
-                    // Return with is_manual=false since we detected actual content
-                    return Ok((detected_bbox, false));
+                    // Still treat as manual bbox even after shrinking, so content clipping will be applied
+                    return Ok((detected_bbox, true));
                 }
                 Err(e) => {
                     #[cfg(target_arch = "wasm32")]

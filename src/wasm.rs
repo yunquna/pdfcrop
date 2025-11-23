@@ -12,7 +12,11 @@ use crate::{crop_pdf, BBoxMethod, BoundingBox, CropOptions, Margins, PageRange};
 #[wasm_bindgen(start)]
 pub fn init() {
     console_error_panic_hook::set_once();
-    wasm_logger::init(wasm_logger::Config::default());
+    // Only show logs from pdfcrop, not from dependencies like hayro (which spams thousands of debug logs)
+    wasm_logger::init(
+        wasm_logger::Config::default()
+            .module_prefix("pdfcrop")  // Only log from pdfcrop modules
+    );
 }
 
 /// WASM-friendly bounding box structure
