@@ -467,9 +467,9 @@ dependencies = [
 
 [[package]]
 name = "fearless_simd"
-version = "0.2.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb8f822f06d1b452a9207f11ce3292f7ee6c23d5d2e7ddfd07990a9107804850"
+checksum = "8fb2907d1f08b2b316b9223ced5b0e89d87028ba8deae9764741dba8ff7f3903"
 dependencies = [
  "bytemuck",
 ]
@@ -2204,8 +2204,9 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "vello_common"
-version = "0.0.1"
-source = "git+https://github.com/linebender/vello?rev=9ae9a530#9ae9a5303bf3043cb3631159bbaedebd26077252"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a235ba928b3109ad9e7696270edb09445a52ae1c7c08e6d31a19b1cdd6cbc24a"
 dependencies = [
  "bytemuck",
  "fearless_simd",
@@ -2218,8 +2219,9 @@ dependencies = [
 
 [[package]]
 name = "vello_cpu"
-version = "0.0.1"
-source = "git+https://github.com/linebender/vello?rev=9ae9a530#9ae9a5303bf3043cb3631159bbaedebd26077252"
+version = "0.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b0bd1fcf9c1814f17a491e07113623d44e3ec1125a9f3401f5e047d6d326da21"
 dependencies = [
  "bytemuck",
  "vello_common",

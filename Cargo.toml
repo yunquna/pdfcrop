@@ -31,7 +31,7 @@ rayon = { version = "1.10", optional = true }
 # Rendering-based bbox detection
 hayro = "0.4"
 hayro-interpret = "0.4"
-vello_cpu = { git = "https://github.com/linebender/vello", rev = "9ae9a530", default-features = false, features = ["std", "png"] }
+vello_cpu = { version = "0.0.4", default-features = false, features = ["std", "png"] }
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]
