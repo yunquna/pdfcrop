@@ -38,8 +38,14 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
     {
         use wasm_bindgen::JsValue;
         web_sys::console::log_1(&JsValue::from_str("[DEBUG] crop_pdf called"));
-        web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] page_range: {:?}", options.page_range)));
-        web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] shrink_to_content: {}", options.shrink_to_content)));
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[DEBUG] page_range: {:?}",
+            options.page_range
+        )));
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[DEBUG] shrink_to_content: {}",
+            options.shrink_to_content
+        )));
     }
 
     // Load the PDF document
@@ -50,7 +56,10 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
     #[cfg(target_arch = "wasm32")]
     {
         use wasm_bindgen::JsValue;
-        web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Total pages in document: {}", page_count)));
+        web_sys::console::log_1(&JsValue::from_str(&format!(
+            "[DEBUG] Total pages in document: {}",
+            page_count
+        )));
     }
 
     // Determine which pages to process based on page_range option
@@ -64,7 +73,11 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         if pages_to_process.len() == page_count {
             eprintln!("Processing all {} pages", page_count);
         } else {
-            eprintln!("Processing {} of {} pages", pages_to_process.len(), page_count);
+            eprintln!(
+                "Processing {} of {} pages",
+                pages_to_process.len(),
+                page_count
+            );
         }
     }
 
@@ -74,9 +87,12 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
     let bbox_results: Vec<_> = {
         use rayon::prelude::*;
         pages_to_process
-            .par_iter()  // Rayon parallel iterator
+            .par_iter() // Rayon parallel iterator
             .map(|&page_num| {
-                (page_num, bbox_detection_task(pdf_data, &doc, page_num, &options))
+                (
+                    page_num,
+                    bbox_detection_task(pdf_data, &doc, page_num, &options),
+                )
             })
             .collect::<Vec<_>>()
     };
@@ -86,15 +102,23 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
     let bbox_results: Vec<_> = pages_to_process
         .iter()
         .map(|&page_num| {
-            (page_num, bbox_detection_task(pdf_data, &doc, page_num, &options))
+            (
+                page_num,
+                bbox_detection_task(pdf_data, &doc, page_num, &options),
+            )
         })
         .collect::<Vec<_>>();
 
     // Phase 2: Apply cropboxes sequentially (mutates document, must be sequential)
     for (page_num, bbox_result) in bbox_results.iter() {
         // Extract bbox from result (propagate errors)
-        let (final_bbox, is_manual) = bbox_result.as_ref()
-            .map_err(|e| Error::PdfParse(format!("Failed to detect bbox for page {}: {}", page_num + 1, e)))?;
+        let (final_bbox, is_manual) = bbox_result.as_ref().map_err(|e| {
+            Error::PdfParse(format!(
+                "Failed to detect bbox for page {}: {}",
+                page_num + 1,
+                e
+            ))
+        })?;
 
         // Apply content filtering if enabled and bbox was manually specified
         // Now supports recursive Form XObject filtering
@@ -135,7 +159,7 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         let pages_to_remove: Vec<u32> = all_pages
             .iter()
             .filter(|&&p| !pages_to_process.contains(&p))
-            .map(|&p| (p + 1) as u32)  // Convert to 1-indexed for lopdf
+            .map(|&p| (p + 1) as u32) // Convert to 1-indexed for lopdf
             .collect();
 
         if !pages_to_remove.is_empty() {
@@ -143,13 +167,27 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
             #[cfg(target_arch = "wasm32")]
             {
                 use wasm_bindgen::JsValue;
-                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Removing {} pages not in range: {:?}", pages_to_remove.len(), pages_to_remove)));
-                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Pages to keep (0-indexed): {:?}", pages_to_process)));
-                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Page count before deletion: {}", page_count)));
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[DEBUG] Removing {} pages not in range: {:?}",
+                    pages_to_remove.len(),
+                    pages_to_remove
+                )));
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[DEBUG] Pages to keep (0-indexed): {:?}",
+                    pages_to_process
+                )));
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[DEBUG] Page count before deletion: {}",
+                    page_count
+                )));
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
-                eprintln!("[DEBUG] Removing {} pages not in range: {:?}", pages_to_remove.len(), pages_to_remove);
+                eprintln!(
+                    "[DEBUG] Removing {} pages not in range: {:?}",
+                    pages_to_remove.len(),
+                    pages_to_remove
+                );
                 eprintln!("[DEBUG] Pages to keep (0-indexed): {:?}", pages_to_process);
                 eprintln!("[DEBUG] Page count before deletion: {}", page_count);
             }
@@ -162,8 +200,13 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
             #[cfg(target_arch = "wasm32")]
             {
                 use wasm_bindgen::JsValue;
-                web_sys::console::log_1(&JsValue::from_str(&format!("[DEBUG] Page count after deletion: {}", new_count)));
-                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Cleaning up unused objects..."));
+                web_sys::console::log_1(&JsValue::from_str(&format!(
+                    "[DEBUG] Page count after deletion: {}",
+                    new_count
+                )));
+                web_sys::console::log_1(&JsValue::from_str(
+                    "[DEBUG] Cleaning up unused objects...",
+                ));
             }
             #[cfg(not(target_arch = "wasm32"))]
             {
@@ -172,10 +215,10 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
             }
 
             // Clean up unused objects to reduce file size
-            doc.delete_zero_length_streams();  // Remove empty streams
-            doc.prune_objects();               // Remove unused objects
-            doc.renumber_objects();            // Reorganize object IDs
-            doc.compress();                    // Compress stream objects
+            doc.delete_zero_length_streams(); // Remove empty streams
+            doc.prune_objects(); // Remove unused objects
+            doc.renumber_objects(); // Reorganize object IDs
+            doc.compress(); // Compress stream objects
 
             #[cfg(target_arch = "wasm32")]
             {
@@ -212,10 +255,8 @@ fn bbox_detection_task(
     // Determine which bounding box to use and whether it was manually specified
     // This uses pdf_data directly without re-serializing, and can run in parallel
     let (bbox, is_manual) = determine_bbox_with_source_parallel(
-        pdf_data,
-        doc,  // Read-only access for page dimensions
-        page_num,
-        options,
+        pdf_data, doc, // Read-only access for page dimensions
+        page_num, options,
     )?;
 
     if options.verbose {
@@ -259,7 +300,7 @@ fn bbox_detection_task(
 /// Returns (bbox, is_manual) where is_manual is true if the bbox came from a manual override
 fn determine_bbox_with_source_parallel(
     pdf_data: &[u8],
-    doc: &Document,  // Read-only reference (thread-safe)
+    doc: &Document, // Read-only reference (thread-safe)
     page_num: usize,
     options: &CropOptions,
 ) -> Result<(BoundingBox, bool)> {
@@ -284,7 +325,9 @@ fn determine_bbox_with_source_parallel(
                 #[cfg(target_arch = "wasm32")]
                 {
                     use wasm_bindgen::JsValue;
-                    web_sys::console::log_1(&JsValue::from_str("[DEBUG] Shrinking per-page bbox to actual content..."));
+                    web_sys::console::log_1(&JsValue::from_str(
+                        "[DEBUG] Shrinking per-page bbox to actual content...",
+                    ));
                 }
 
                 match detect_bbox_within_region(pdf_data, page_num, &bbox, options.verbose) {
@@ -294,8 +337,10 @@ fn determine_bbox_with_source_parallel(
                             use wasm_bindgen::JsValue;
                             web_sys::console::log_1(&JsValue::from_str(&format!(
                                 "[DEBUG] Shrunk to: ({:.2}, {:.2}, {:.2}, {:.2})",
-                                detected_bbox.left, detected_bbox.bottom,
-                                detected_bbox.right, detected_bbox.top
+                                detected_bbox.left,
+                                detected_bbox.bottom,
+                                detected_bbox.right,
+                                detected_bbox.top
                             )));
                         }
                         // Still treat as manual bbox even after shrinking, so content clipping will be applied
@@ -329,7 +374,8 @@ fn determine_bbox_with_source_parallel(
     } else {
         // Even page
         options.bbox_even
-    }.or(options.bbox_override); // Fall back to global override
+    }
+    .or(options.bbox_override); // Fall back to global override
 
     // If we have a manual bbox and shrink_to_content is enabled, detect content within it
     if let Some(bbox) = manual_bbox {
@@ -344,15 +390,19 @@ fn determine_bbox_with_source_parallel(
 
         if options.shrink_to_content {
             if options.verbose {
-                eprintln!("  Manual bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
-                         bbox.left, bbox.bottom, bbox.right, bbox.top);
+                eprintln!(
+                    "  Manual bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                    bbox.left, bbox.bottom, bbox.right, bbox.top
+                );
                 eprintln!("  Detecting actual content within manual bbox...");
             }
 
             #[cfg(target_arch = "wasm32")]
             {
                 use wasm_bindgen::JsValue;
-                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Shrinking manual bbox to actual content..."));
+                web_sys::console::log_1(&JsValue::from_str(
+                    "[DEBUG] Shrinking manual bbox to actual content...",
+                ));
             }
 
             // Detect content within the manual bbox region
@@ -364,15 +414,21 @@ fn determine_bbox_with_source_parallel(
                         use wasm_bindgen::JsValue;
                         web_sys::console::log_1(&JsValue::from_str(&format!(
                             "[DEBUG] Shrunk to: ({:.2}, {:.2}, {:.2}, {:.2})",
-                            detected_bbox.left, detected_bbox.bottom,
-                            detected_bbox.right, detected_bbox.top
+                            detected_bbox.left,
+                            detected_bbox.bottom,
+                            detected_bbox.right,
+                            detected_bbox.top
                         )));
                     }
 
                     if options.verbose {
-                        eprintln!("  Shrunk to actual content: ({:.2}, {:.2}, {:.2}, {:.2})",
-                                 detected_bbox.left, detected_bbox.bottom,
-                                 detected_bbox.right, detected_bbox.top);
+                        eprintln!(
+                            "  Shrunk to actual content: ({:.2}, {:.2}, {:.2}, {:.2})",
+                            detected_bbox.left,
+                            detected_bbox.bottom,
+                            detected_bbox.right,
+                            detected_bbox.top
+                        );
                     }
                     // Still treat as manual bbox even after shrinking, so content clipping will be applied
                     return Ok((detected_bbox, true));
@@ -398,7 +454,9 @@ fn determine_bbox_with_source_parallel(
             #[cfg(target_arch = "wasm32")]
             {
                 use wasm_bindgen::JsValue;
-                web_sys::console::log_1(&JsValue::from_str("[DEBUG] Using manual bbox without shrinking"));
+                web_sys::console::log_1(&JsValue::from_str(
+                    "[DEBUG] Using manual bbox without shrinking",
+                ));
             }
 
             // Manual bbox without shrinking - return with is_manual=true
@@ -416,7 +474,13 @@ fn determine_bbox_with_source_parallel(
     }
 
     // Auto-detect bbox using specified method - use pdf_data directly for efficiency
-    let bbox = detect_bbox_with_method_parallel(pdf_data, doc, page_num, options.bbox_method, options.verbose)?;
+    let bbox = detect_bbox_with_method_parallel(
+        pdf_data,
+        doc,
+        page_num,
+        options.bbox_method,
+        options.verbose,
+    )?;
     Ok((bbox, false))
 }
 
@@ -450,14 +514,17 @@ fn determine_bbox_with_source(
     } else {
         // Even page
         options.bbox_even
-    }.or(options.bbox_override); // Fall back to global override
+    }
+    .or(options.bbox_override); // Fall back to global override
 
     // If we have a manual bbox and shrink_to_content is enabled, detect content within it
     if let Some(bbox) = manual_bbox {
         if options.shrink_to_content {
             if options.verbose {
-                eprintln!("  Manual bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
-                         bbox.left, bbox.bottom, bbox.right, bbox.top);
+                eprintln!(
+                    "  Manual bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                    bbox.left, bbox.bottom, bbox.right, bbox.top
+                );
                 eprintln!("  Detecting actual content within manual bbox...");
             }
 
@@ -466,9 +533,13 @@ fn determine_bbox_with_source(
             match detect_bbox_within_region(pdf_data, page_num, &bbox, options.verbose) {
                 Ok(detected_bbox) => {
                     if options.verbose {
-                        eprintln!("  Shrunk to actual content: ({:.2}, {:.2}, {:.2}, {:.2})",
-                                 detected_bbox.left, detected_bbox.bottom,
-                                 detected_bbox.right, detected_bbox.top);
+                        eprintln!(
+                            "  Shrunk to actual content: ({:.2}, {:.2}, {:.2}, {:.2})",
+                            detected_bbox.left,
+                            detected_bbox.bottom,
+                            detected_bbox.right,
+                            detected_bbox.top
+                        );
                     }
                     // Return with is_manual=false since we detected actual content
                     return Ok((detected_bbox, false));
@@ -488,7 +559,13 @@ fn determine_bbox_with_source(
     }
 
     // Auto-detect bbox using specified method - return with is_manual=false
-    let bbox = detect_bbox_with_method(pdf_data, doc, page_num, options.bbox_method, options.verbose)?;
+    let bbox = detect_bbox_with_method(
+        pdf_data,
+        doc,
+        page_num,
+        options.bbox_method,
+        options.verbose,
+    )?;
     Ok((bbox, false))
 }
 
@@ -585,19 +662,17 @@ fn detect_bbox_within_region(
 /// Detect bounding box using the specified method (parallel-safe version using pdf_data directly)
 fn detect_bbox_with_method_parallel(
     pdf_data: &[u8],
-    _doc: &Document,  // Not used, but kept for potential future use
+    _doc: &Document, // Not used, but kept for potential future use
     page_num: usize,
     method: crate::BBoxMethod,
     verbose: bool,
 ) -> Result<BoundingBox> {
-    use crate::BBoxMethod;
     use crate::bbox::detect_bbox_by_rendering;
+    use crate::BBoxMethod;
 
     match method {
         #[cfg(not(target_arch = "wasm32"))]
-        BBoxMethod::Ghostscript => {
-            crate::ghostscript::detect_bbox_gs(pdf_data, page_num)
-        }
+        BBoxMethod::Ghostscript => crate::ghostscript::detect_bbox_gs(pdf_data, page_num),
         #[cfg(target_arch = "wasm32")]
         BBoxMethod::Ghostscript => {
             // Ghostscript not available in WASM, fall back to rendering
@@ -622,7 +697,10 @@ fn detect_bbox_with_method_parallel(
                 }
                 Err(e) => {
                     if verbose {
-                        eprintln!("  Ghostscript unavailable ({}), using rendering-based detection", e);
+                        eprintln!(
+                            "  Ghostscript unavailable ({}), using rendering-based detection",
+                            e
+                        );
                     }
                     // Use rendering-based detection directly on pdf_data
                     detect_bbox_by_rendering(pdf_data, page_num, Some(72.0))
@@ -639,7 +717,7 @@ fn detect_bbox_with_method_parallel(
 
 /// Detect bounding box using the specified method (legacy version for compatibility)
 #[allow(dead_code)]
-#[allow(unused_variables)]  // pdf_data unused in WASM builds (no Ghostscript)
+#[allow(unused_variables)] // pdf_data unused in WASM builds (no Ghostscript)
 fn detect_bbox_with_method(
     pdf_data: &[u8],
     doc: &mut Document,
@@ -651,9 +729,7 @@ fn detect_bbox_with_method(
 
     match method {
         #[cfg(not(target_arch = "wasm32"))]
-        BBoxMethod::Ghostscript => {
-            crate::ghostscript::detect_bbox_gs(pdf_data, page_num)
-        }
+        BBoxMethod::Ghostscript => crate::ghostscript::detect_bbox_gs(pdf_data, page_num),
         #[cfg(target_arch = "wasm32")]
         BBoxMethod::Ghostscript => {
             // Ghostscript not available in WASM
@@ -662,9 +738,7 @@ fn detect_bbox_with_method(
             }
             detect_bbox(doc, page_num)
         }
-        BBoxMethod::ContentStream => {
-            detect_bbox(doc, page_num)
-        }
+        BBoxMethod::ContentStream => detect_bbox(doc, page_num),
         #[cfg(not(target_arch = "wasm32"))]
         BBoxMethod::Auto => {
             // Try Ghostscript first
@@ -677,7 +751,10 @@ fn detect_bbox_with_method(
                 }
                 Err(e) => {
                     if verbose {
-                        eprintln!("  Ghostscript unavailable ({}), using content stream parsing", e);
+                        eprintln!(
+                            "  Ghostscript unavailable ({}), using content stream parsing",
+                            e
+                        );
                     }
                     detect_bbox(doc, page_num)
                 }

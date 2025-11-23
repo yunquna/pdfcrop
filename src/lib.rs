@@ -41,7 +41,7 @@ pub mod pdf_ops;
 #[cfg(target_arch = "wasm32")]
 pub mod wasm;
 
-pub use bbox::{BoundingBox, detect_bbox};
+pub use bbox::{detect_bbox, BoundingBox};
 pub use crop::crop_pdf;
 pub use error::{Error, Result};
 pub use margins::Margins;
@@ -97,12 +97,11 @@ impl PageRange {
                 let end = (*end).min(total_pages.saturating_sub(1));
                 (start..=end).collect()
             }
-            PageRange::List(pages) => {
-                pages.iter()
-                    .filter(|&&p| p < total_pages)
-                    .copied()
-                    .collect()
-            }
+            PageRange::List(pages) => pages
+                .iter()
+                .filter(|&&p| p < total_pages)
+                .copied()
+                .collect(),
         }
     }
 }
@@ -157,11 +156,11 @@ impl Default for CropOptions {
             bbox_odd: None,
             bbox_even: None,
             page_bboxes: None,
-            page_range: None,  // Default: crop all pages
+            page_range: None,                       // Default: crop all pages
             bbox_method: BBoxMethod::ContentStream, // Pure Rust, WASM-compatible by default
             verbose: false,
-            clip_content: false,  // Default: only set CropBox (standard PDF cropping behavior)
-            shrink_to_content: false,  // Default: don't auto-shrink manual bbox
+            clip_content: false, // Default: only set CropBox (standard PDF cropping behavior)
+            shrink_to_content: false, // Default: don't auto-shrink manual bbox
         }
     }
 }

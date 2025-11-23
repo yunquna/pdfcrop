@@ -41,10 +41,19 @@ pub(crate) fn detect_annotation_bbox(
             match doc.get_object(*ref_id) {
                 Ok(Object::Array(arr)) => arr,
                 Ok(_) => return Err(Error::PdfParse("Annots reference is not an array".into())),
-                Err(e) => return Err(Error::PdfParse(format!("Failed to dereference Annots: {}", e))),
+                Err(e) => {
+                    return Err(Error::PdfParse(format!(
+                        "Failed to dereference Annots: {}",
+                        e
+                    )))
+                }
             }
         }
-        _ => return Err(Error::PdfParse("Annots is not an array or reference".into())),
+        _ => {
+            return Err(Error::PdfParse(
+                "Annots is not an array or reference".into(),
+            ))
+        }
     };
 
     if annots_array.is_empty() {
@@ -75,12 +84,10 @@ pub(crate) fn detect_annotation_bbox(
         // Format: [x1 y1 x2 y2] where (x1,y1) is bottom-left, (x2,y2) is top-right
         let rect = match annot_dict.get(b"Rect") {
             Ok(Object::Array(arr)) => arr,
-            Ok(Object::Reference(ref_id)) => {
-                match doc.get_object(*ref_id) {
-                    Ok(Object::Array(arr)) => arr,
-                    _ => continue,
-                }
-            }
+            Ok(Object::Reference(ref_id)) => match doc.get_object(*ref_id) {
+                Ok(Object::Array(arr)) => arr,
+                _ => continue,
+            },
             _ => continue, // No Rect, skip this annotation
         };
 

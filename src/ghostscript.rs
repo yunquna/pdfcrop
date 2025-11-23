@@ -73,7 +73,8 @@ fn find_ghostscript() -> Result<String> {
         "Ghostscript not found. Please install Ghostscript:\n\
          - macOS: brew install ghostscript\n\
          - Ubuntu/Debian: sudo apt-get install ghostscript\n\
-         - Windows: download from https://www.ghostscript.com/".to_string()
+         - Windows: download from https://www.ghostscript.com/"
+            .to_string(),
     ))
 }
 

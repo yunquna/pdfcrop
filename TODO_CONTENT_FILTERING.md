@@ -10,66 +10,30 @@ The `--clip` flag is intended to remove PDF content outside the crop box for pri
 2. **No Visual Shifts**: Original content streams are kept when no filtering occurs
 3. **Path/Image Filtering**: Graphics paths and images outside crop box are correctly removed
 4. **Proper PDFs**: Well-formed PDFs with BT/ET blocks work correctly
+5. **Orphaned Text Filtering**: Text operators outside BT/ET blocks are now measured using real font metrics and filtered when they fall entirely outside the crop box
 
-### Not Working ❌
-1. **Orphaned Text Filtering**: Cannot spatially filter text operators outside BT/ET blocks
-2. **Incomplete Position Tracking**: Text positions don't account for page-level transformations
+### Remaining Gaps ⚠️
+1. **Incomplete Font Coverage**: If a page references fonts without usable metrics (rare), orphaned text falls back to "keep" mode for safety
+2. **Advanced Transformations**: Rendering-based validation (hayro) would still be the gold standard for exotic text effects, warping, or vertical writing modes
 
 ## Remaining Work
 
-### 1. Implement Proper Text Bbox Calculation
-**Problem**: Orphaned text operators (outside BT/ET) cannot be filtered because we can't calculate their actual bounding boxes.
+### 1. Rendering-Based Validation (Optional but Ideal)
+The new bounding-box approach relies on PDF font metrics and transformation tracking. For bulletproof results on every PDF ever produced, integrating hayro-based validation is still valuable:
+1. Render orphaned components in isolation
+2. Inspect rendered pixels to confirm visibility inside the crop
+3. Use that as the ultimate decision-maker (fonts + transformations + clipping handled automatically)
 
-**Current Code Location**: `src/content_filter.rs` lines 414-438
+**Status**: Previously scaffolded in `src/content_filter_render.rs`, but removed now that it was unused. If we want a “paranoid mode,” reintroduce a minimal render-backed helper instead of keeping dead code.
 
-**What's Needed**:
-- Parse text content from Tj/TJ operands
-- Load font metrics from PDF resources
-- Calculate actual text width using character advances
-- Apply full transformation stack (CTM + text matrix)
+### 2. Font Metrics Fallbacks
+Most modern PDFs embed fonts with valid `/Widths` or `/W` arrays, which the new `FontCache` consumes. Remaining polish tasks:
+- Support Identity-V or exotic CMap encodings
+- Detect Type3 fonts and fall back to hayro rendering
+- Cache metrics across pages & form XObjects (currently page-level caches)
 
-**Suggested Approach**:
-```rust
-// In parse_into_components(), for orphaned text operators:
-1. Extract text string from operands
-2. Get current font from resources using font name
-3. For each character:
-   - Get glyph width from font
-   - Sum up advances
-4. Calculate bbox: (x, y, x+width, y+height)
-5. Apply CTM transformation to get page coordinates
-```
-
-### 2. Use Hayro for Accurate Text Measurement
-**Alternative Approach**: Use hayro's rendering to determine actual text bounds
-
-**Implementation**:
-```rust
-// In content_filter_render.rs
-pub fn calculate_text_bbox(
-    pdf_bytes: &[u8],
-    page_num: usize,
-    text_op: &Operation,
-    state: &GraphicsState,
-) -> Result<BoundingBox> {
-    // 1. Create minimal PDF with just this text operation
-    // 2. Render with hayro at high resolution
-    // 3. Find non-white pixels to get actual bounds
-    // 4. Return calculated bbox
-}
-```
-
-### 3. Fix Coordinate System Transformation
-**Problem**: Text positions show as (0, -10, -20) instead of actual page coordinates
-
-**Investigation Needed**:
-- Check if there's a page-level transformation matrix
-- Verify CTM is being properly tracked through graphics state saves/restores
-- Ensure text matrix and CTM are being combined correctly
-
-**Debug Points**:
-- `src/content_filter.rs` line 475-480 (Tm handling)
-- `src/content_filter.rs` line 35-50 (GraphicsState transform methods)
+### 3. Comprehensive Telemetry
+The new filtering path reports stats for orphaned text (kept vs removed). Surfacing that information via `--verbose` / WASM logs will help users confirm when text was actually removed or retained for safety.
 
 ## Test Procedure
 
@@ -80,14 +44,11 @@ pub fn calculate_text_bbox(
 
 #### 1. Basic Functionality Test
 ```bash
-# Without clip (baseline)
-./target/release/pdfcrop --bbox "494.26 465.45 590.31 546.72" --shrink-to-content A_Neural_Receiver_for_5G_NR_Multi-User_MIMO.pdf /tmp/no_clip.pdf
-
 # With clip (should be visually identical, but with content removed)
 ./target/release/pdfcrop --bbox "494.26 465.45 590.31 546.72" --clip --shrink-to-content A_Neural_Receiver_for_5G_NR_Multi-User_MIMO.pdf /tmp/with_clip.pdf
 
 # Compare visually
-open /tmp/no_clip.pdf /tmp/with_clip.pdf
+open A_Neural_Receiver_for_5G_NR_Multi-User_MIMO.pdf /tmp/with_clip.pdf
 ```
 
 #### 2. Debug Content Filtering
@@ -106,9 +67,8 @@ open /tmp/no_clip.pdf /tmp/with_clip.pdf
 ./target/release/pdfcrop --bbox "494.26 465.45 590.31 546.72" --clip --shrink-to-content A_Neural_Receiver_for_5G_NR_Multi-User_MIMO.pdf /tmp/test.pdf 2>&1 | grep "WARNING.*Orphaned"
 
 # Shows positions like:
-# [WARNING] Orphaned 'TJ' at (0.0, 0.0)
-# [WARNING] Orphaned 'TJ' at (0.0, -10.0)
-# These positions are wrong - should be in page coordinates
+# [WARNING] Orphaned 'TJ' encountered without active font - keeping in stream
+# These only appear if the PDF omits usable font metrics (rare). In that case, content is safely kept.
 ```
 
 #### 4. Verify No Visual Shift
@@ -128,13 +88,12 @@ ls -l /tmp/test*.pdf
 4. ✅ File size should be reduced when content is filtered
 
 ### Known Issues
-1. **Conservative Filtering**: Orphaned text is always kept to avoid data loss
-2. **Position Calculation**: Text positions don't reflect actual page coordinates
-3. **Font Metrics**: No font width calculation, so bbox estimates are rough
+1. **Conservative Fallback**: Fonts without `Widths`/`W` arrays are retained (no best-effort removal)
+2. **Rendering Mode**: hayro-based validation still TODO for 100% fidelity
+3. **Vertical Text**: Identity-V and text rotations beyond standard baselines fall back to bounding-box approximations. Rendering validation will close this gap.
 
 ## Related Files
 - `src/content_filter.rs` - Main filtering logic
-- `src/content_filter_render.rs` - Rendering-based filtering (started but incomplete)
 - `src/pdf_ops.rs` - Calls content filtering
 - `src/crop.rs` - Crop box calculation
 

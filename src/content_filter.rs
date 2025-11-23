@@ -6,7 +6,11 @@
 
 use crate::bbox::BoundingBox;
 use crate::error::{Error, Result};
-use lopdf::{content::{Content, Operation}, Dictionary, Document, Object, ObjectId, Stream};
+use lopdf::{
+    content::{Content, Operation},
+    Dictionary, Document, Object, ObjectId, Stream,
+};
+use std::collections::HashMap;
 
 /// Graphics state for tracking transformations and positions
 #[derive(Debug, Clone)]
@@ -15,10 +19,24 @@ struct GraphicsState {
     ctm: [f64; 6],
     /// Current text matrix
     text_matrix: [f64; 6],
+    /// Current text line matrix (used for T*, Td, TD)
+    text_line_matrix: [f64; 6],
     /// Current text position
     text_pos: (f64, f64),
     /// Current font size (from Tf operator)
     font_size: f64,
+    /// Current font name (from Tf operator)
+    font_name: Option<Vec<u8>>,
+    /// Character spacing (Tc)
+    char_spacing: f64,
+    /// Word spacing (Tw)
+    word_spacing: f64,
+    /// Horizontal scaling (Tz) expressed as factor (1.0 == 100%)
+    horiz_scaling: f64,
+    /// Text leading (TL)
+    leading: f64,
+    /// Text rise (Ts)
+    text_rise: f64,
 }
 
 impl Default for GraphicsState {
@@ -26,8 +44,15 @@ impl Default for GraphicsState {
         GraphicsState {
             ctm: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], // Identity matrix
             text_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
+            text_line_matrix: [1.0, 0.0, 0.0, 1.0, 0.0, 0.0],
             text_pos: (0.0, 0.0),
             font_size: 12.0,
+            font_name: None,
+            char_spacing: 0.0,
+            word_spacing: 0.0,
+            horiz_scaling: 1.0,
+            leading: 0.0,
+            text_rise: 0.0,
         }
     }
 }
@@ -53,6 +78,397 @@ impl GraphicsState {
         let [a, b, c, d, e, f] = self.ctm;
         (a * x + c * y + e, b * x + d * y + f)
     }
+
+    /// Reset text-related state when entering BT or when text resources change
+    fn reset_text_state(&mut self) {
+        self.text_matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        self.text_line_matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+        self.text_pos = (0.0, 0.0);
+        self.char_spacing = 0.0;
+        self.word_spacing = 0.0;
+        self.horiz_scaling = 1.0;
+        self.leading = 0.0;
+        self.text_rise = 0.0;
+    }
+
+    /// Set current text matrix and update cached position/line matrix
+    fn set_text_matrix(&mut self, matrix: [f64; 6]) {
+        self.text_matrix = matrix;
+        self.text_line_matrix = matrix;
+        self.update_text_position();
+    }
+
+    /// Translate current text matrix by tx, ty
+    fn translate_text_matrix(&mut self, tx: f64, ty: f64) {
+        let translation = [1.0, 0.0, 0.0, 1.0, tx, ty];
+        self.text_matrix = multiply_matrices(&self.text_matrix, &translation);
+        self.update_text_position();
+    }
+
+    /// Translate text line matrix (affects T*, Td, TD)
+    fn translate_text_line_matrix(&mut self, tx: f64, ty: f64) {
+        let translation = [1.0, 0.0, 0.0, 1.0, tx, ty];
+        self.text_line_matrix = multiply_matrices(&self.text_line_matrix, &translation);
+        self.text_matrix = self.text_line_matrix;
+        self.update_text_position();
+    }
+
+    /// Move to start of next line (T*)
+    fn move_to_next_line(&mut self) {
+        let ty = -self.leading;
+        self.translate_text_line_matrix(0.0, ty);
+    }
+
+    /// Get combined text matrix (text matrix composed with CTM)
+    fn combined_text_matrix(&self) -> [f64; 6] {
+        multiply_matrices(&self.ctm, &self.text_matrix)
+    }
+
+    fn update_text_position(&mut self) {
+        self.text_pos = (self.text_matrix[4], self.text_matrix[5]);
+    }
+}
+
+/// Cached font metrics for calculating text bounding boxes
+#[derive(Clone, Debug)]
+struct FontMetrics {
+    widths: HashMap<u32, f64>,
+    default_width: f64,
+    ascent: f64,
+    descent: f64,
+    is_cid: bool,
+    bytes_per_char: usize,
+    writing_mode: WritingMode,
+}
+
+impl FontMetrics {
+    fn glyph_width(&self, code: u32) -> f64 {
+        self.widths
+            .get(&code)
+            .copied()
+            .unwrap_or(self.default_width)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum WritingMode {
+    Horizontal,
+    Vertical,
+}
+
+/// Lazy font metrics cache keyed by font resource name
+#[derive(Default)]
+struct FontCache {
+    cache: HashMap<Vec<u8>, FontMetrics>,
+}
+
+impl FontCache {
+    fn new() -> Self {
+        Self {
+            cache: HashMap::new(),
+        }
+    }
+
+    fn get(
+        &mut self,
+        doc: &Document,
+        resources: Option<&Dictionary>,
+        font_name: &[u8],
+    ) -> Option<FontMetrics> {
+        if let Some(metrics) = self.cache.get(font_name) {
+            return Some(metrics.clone());
+        }
+
+        let metrics = load_font_metrics(doc, resources, font_name)?;
+        self.cache.insert(font_name.to_vec(), metrics.clone());
+        Some(metrics)
+    }
+}
+
+fn load_font_metrics(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    font_name: &[u8],
+) -> Option<FontMetrics> {
+    let font_dict = get_font_dictionary(doc, resources, font_name)?;
+    let subtype = font_dict
+        .get(b"Subtype")
+        .ok()
+        .and_then(|obj| obj.as_name().ok())?;
+
+    match subtype {
+        b"Type0" => parse_type0_font(doc, &font_dict),
+        b"Type1" | b"TrueType" => parse_type1_font(doc, &font_dict),
+        b"Type3" => parse_type3_font(doc, &font_dict),
+        _ => None,
+    }
+}
+
+fn get_font_dictionary(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    font_name: &[u8],
+) -> Option<Dictionary> {
+    let resources = resources?;
+    let font_entry = resources.get(b"Font").ok()?;
+    let font_dict_obj = resolve_to_owned(doc, font_entry)?;
+    let font_dict = font_dict_obj.as_dict().ok()?;
+    let font_obj = font_dict.get(font_name).ok()?.clone();
+    match resolve_to_owned(doc, &font_obj)? {
+        Object::Dictionary(dict) => Some(dict),
+        Object::Stream(stream) => Some(stream.dict),
+        _ => None,
+    }
+}
+
+fn resolve_to_owned(doc: &Document, obj: &Object) -> Option<Object> {
+    match obj {
+        Object::Reference(id) => doc.get_object(*id).ok().cloned(),
+        other => Some(other.clone()),
+    }
+}
+
+fn parse_type1_font(doc: &Document, font_dict: &Dictionary) -> Option<FontMetrics> {
+    let first_char = font_dict
+        .get(b"FirstChar")
+        .ok()
+        .and_then(|obj| obj.as_i64().ok())
+        .unwrap_or(0) as u32;
+
+    let widths_obj = font_dict.get(b"Widths").ok()?;
+    let widths_array_obj = resolve_to_owned(doc, widths_obj)?;
+    let widths_array = widths_array_obj.as_array().ok()?;
+
+    let mut widths = HashMap::new();
+    for (idx, value) in widths_array.iter().enumerate() {
+        if let Some(width) = object_to_f64(value) {
+            widths.insert(first_char + idx as u32, width);
+        }
+    }
+
+    let descriptor_dict = font_dict
+        .get(b"FontDescriptor")
+        .ok()
+        .and_then(|obj| resolve_to_owned(doc, obj))
+        .and_then(|obj| match obj {
+            Object::Dictionary(dict) => Some(dict),
+            Object::Stream(stream) => Some(stream.dict),
+            _ => None,
+        });
+
+    let (ascent, descent, missing_width) = descriptor_metrics(descriptor_dict.as_ref());
+
+    Some(FontMetrics {
+        widths,
+        default_width: missing_width,
+        ascent,
+        descent,
+        is_cid: false,
+        bytes_per_char: 1,
+        writing_mode: WritingMode::Horizontal,
+    })
+}
+
+fn parse_type0_font(doc: &Document, font_dict: &Dictionary) -> Option<FontMetrics> {
+    // Only handle Identity encodings; detect vertical mode for Identity-V
+    let writing_mode = if let Ok(enc_name) = font_dict.get(b"Encoding").and_then(|obj| obj.as_name()) {
+        match enc_name {
+            b"Identity-H" => WritingMode::Horizontal,
+            b"Identity-V" => WritingMode::Vertical,
+            _ => return None,
+        }
+    } else {
+        WritingMode::Horizontal
+    };
+
+    let descendant_fonts_obj = font_dict.get(b"DescendantFonts").ok()?;
+    let descendant_fonts_resolved = resolve_to_owned(doc, descendant_fonts_obj)?;
+    let descendant_array = descendant_fonts_resolved.as_array().ok()?;
+    let first_descendant = descendant_array.first()?;
+    let descendant_dict_obj = resolve_to_owned(doc, first_descendant)?;
+    let descendant_dict = match descendant_dict_obj {
+        Object::Dictionary(dict) => dict,
+        Object::Stream(stream) => stream.dict,
+        _ => return None,
+    };
+
+    let default_width = descendant_dict
+        .get(b"DW")
+        .ok()
+        .and_then(|obj| object_to_f64(obj))
+        .unwrap_or(1000.0);
+
+    let mut widths = HashMap::new();
+    if let Ok(w_array_obj) = descendant_dict.get(b"W") {
+        if let Some(resolved_w_array) = resolve_to_owned(doc, w_array_obj) {
+            if let Ok(entries) = resolved_w_array.as_array() {
+                parse_cid_widths(entries, &mut widths);
+            }
+        }
+    }
+
+    let descriptor_dict = descendant_dict
+        .get(b"FontDescriptor")
+        .ok()
+        .and_then(|obj| resolve_to_owned(doc, obj))
+        .and_then(|obj| match obj {
+            Object::Dictionary(dict) => Some(dict),
+            Object::Stream(stream) => Some(stream.dict),
+            _ => None,
+        });
+
+    let (ascent, descent, missing_width) = descriptor_metrics(descriptor_dict.as_ref());
+
+    Some(FontMetrics {
+        widths,
+        default_width: if default_width > 0.0 {
+            default_width
+        } else {
+            missing_width
+        },
+        ascent,
+        descent,
+        is_cid: true,
+        bytes_per_char: 2,
+        writing_mode,
+    })
+}
+
+fn parse_type3_font(doc: &Document, font_dict: &Dictionary) -> Option<FontMetrics> {
+    // Type3 fonts may not have Widths; fall back to FontBBox width
+    let bbox_width = font_dict
+        .get(b"FontBBox")
+        .ok()
+        .and_then(|obj| resolve_to_owned(doc, obj))
+        .and_then(|obj| obj.as_array().ok().map(|arr| arr.to_vec()))
+        .and_then(|vals| {
+            if vals.len() == 4 {
+                let left = object_to_f64(&vals[0])?;
+                let right = object_to_f64(&vals[2])?;
+                Some((right - left).abs())
+            } else {
+                None
+            }
+        })
+        .unwrap_or(500.0);
+
+    let mut widths = HashMap::new();
+    for code in 0..=255u32 {
+        widths.insert(code, bbox_width);
+    }
+
+    let (ascent, descent, missing_width) =
+        descriptor_metrics(font_dict.get(b"FontDescriptor").ok().and_then(|obj| {
+            resolve_to_owned(doc, obj).and_then(|o| match o {
+                Object::Dictionary(d) => Some(d),
+                Object::Stream(s) => Some(s.dict),
+                _ => None,
+            })
+        }).as_ref());
+
+    Some(FontMetrics {
+        widths,
+        default_width: missing_width.max(bbox_width),
+        ascent,
+        descent,
+        is_cid: false,
+        bytes_per_char: 1,
+        writing_mode: WritingMode::Horizontal,
+    })
+}
+
+fn descriptor_metrics(descriptor: Option<&Dictionary>) -> (f64, f64, f64) {
+    let ascent = descriptor
+        .and_then(|dict| dict.get(b"Ascent").ok())
+        .and_then(|obj| object_to_f64(obj))
+        .unwrap_or(800.0);
+    let descent = descriptor
+        .and_then(|dict| dict.get(b"Descent").ok())
+        .and_then(|obj| object_to_f64(obj))
+        .unwrap_or(-200.0);
+    let missing_width = descriptor
+        .and_then(|dict| dict.get(b"MissingWidth").ok())
+        .and_then(|obj| object_to_f64(obj))
+        .unwrap_or(500.0);
+
+    (ascent, descent, missing_width)
+}
+
+fn parse_cid_widths(entries: &[Object], widths: &mut HashMap<u32, f64>) {
+    let mut idx = 0;
+    while idx < entries.len() {
+        let start_code = match object_to_u32(&entries[idx]) {
+            Some(val) => val,
+            None => {
+                idx += 1;
+                continue;
+            }
+        };
+
+        if idx + 1 >= entries.len() {
+            break;
+        }
+
+        match &entries[idx + 1] {
+            Object::Array(values) => {
+                for (offset, value) in values.iter().enumerate() {
+                    if let Some(width) = object_to_f64(value) {
+                        widths.insert(start_code + offset as u32, width);
+                    }
+                }
+                idx += 2;
+            }
+            Object::Integer(_) | Object::Real(_) => {
+                if idx + 2 >= entries.len() {
+                    break;
+                }
+                let end_code = match object_to_u32(&entries[idx + 1]) {
+                    Some(val) => val,
+                    None => {
+                        idx += 1;
+                        continue;
+                    }
+                };
+                if let Some(width) = object_to_f64(&entries[idx + 2]) {
+                    for code in start_code..=end_code {
+                        widths.insert(code, width);
+                    }
+                }
+                idx += 3;
+            }
+            _ => {
+                idx += 1;
+            }
+        }
+    }
+}
+
+fn object_to_f64(obj: &Object) -> Option<f64> {
+    match obj {
+        Object::Real(val) => Some(*val as f64),
+        Object::Integer(val) => Some(*val as f64),
+        _ => None,
+    }
+}
+
+fn object_to_u32(obj: &Object) -> Option<u32> {
+    match obj {
+        Object::Integer(val) => {
+            if *val >= 0 {
+                Some(*val as u32)
+            } else {
+                None
+            }
+        }
+        Object::Real(val) => {
+            if *val >= 0.0 {
+                Some(*val as u32)
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
 }
 
 /// Represents a filterable component in a PDF content stream
@@ -74,13 +490,22 @@ enum ContentComponent {
         bbox: Option<BoundingBox>,
     },
     /// Text block (BT...ET) - kept without filtering for safety
-    TextBlock {
-        operators: Vec<Operation>,
+    TextBlock { operators: Vec<Operation> },
+    /// Orphan text operators (Tj/TJ/'/") that appear outside BT/ET blocks
+    OrphanText {
+        operator: Operation,
+        bbox: Option<BoundingBox>,
     },
     /// Graphics state operators (q, Q, cm, colors, line styles) - always kept
-    GraphicsState {
-        operators: Vec<Operation>,
-    },
+    GraphicsState { operators: Vec<Operation> },
+}
+
+fn flush_graphics_ops(components: &mut Vec<ContentComponent>, graphics_ops: &mut Vec<Operation>) {
+    if !graphics_ops.is_empty() {
+        let mut ops = Vec::new();
+        std::mem::swap(&mut ops, graphics_ops);
+        components.push(ContentComponent::GraphicsState { operators: ops });
+    }
 }
 
 /// Parse PDF operations into filterable components
@@ -97,9 +522,15 @@ fn parse_into_components(
             operations.len()
         )));
         // Log all operators if there are few (to understand simple PDFs)
-        let ops_to_log = if operations.len() <= 20 { operations.len() } else { 10 };
+        let ops_to_log = if operations.len() <= 20 {
+            operations.len()
+        } else {
+            10
+        };
         for (i, op) in operations.iter().take(ops_to_log).enumerate() {
-            let operands_str = op.operands.iter()
+            let operands_str = op
+                .operands
+                .iter()
                 .map(|o| match o {
                     Object::Name(n) => format!("Name({})", String::from_utf8_lossy(n)),
                     Object::Real(r) => format!("Real({})", r),
@@ -127,14 +558,20 @@ fn parse_into_components(
     let mut in_text_block = false;
     let mut text_block_ops: Vec<Operation> = Vec::new();
     let mut graphics_state_ops: Vec<Operation> = Vec::new();
+    let mut font_cache = FontCache::new();
 
     for (op_idx, op) in operations.iter().enumerate() {
         let operator = op.operator.as_str();
 
         #[cfg(debug_assertions)]
         if operations.len() <= 5 {
-            eprintln!("[DEBUG] Operation {}: '{}' ({} bytes) with {} operands",
-                op_idx, operator, op.operator.len(), op.operands.len());
+            eprintln!(
+                "[DEBUG] Operation {}: '{}' ({} bytes) with {} operands",
+                op_idx,
+                operator,
+                op.operator.len(),
+                op.operands.len()
+            );
             if operator == "Do" || operator.contains("o") {
                 eprintln!("[DEBUG] Operator bytes: {:?}", op.operator.as_bytes());
                 if let Some(first_operand) = op.operands.first() {
@@ -151,18 +588,11 @@ fn parse_into_components(
                     use wasm_bindgen::JsValue;
                     web_sys::console::log_1(&JsValue::from_str("[DEBUG] Found BT (Begin Text)"));
                 }
-                // Flush any pending graphics state ops
-                if !graphics_state_ops.is_empty() {
-                    components.push(ContentComponent::GraphicsState {
-                        operators: graphics_state_ops.clone(),
-                    });
-                    graphics_state_ops.clear();
-                }
+                flush_graphics_ops(&mut components, &mut graphics_state_ops);
                 in_text_block = true;
                 text_block_ops.clear();
                 text_block_ops.push(op.clone());
-                state.text_matrix = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
-                state.text_pos = (0.0, 0.0);
+                state.reset_text_state();
             }
             "ET" => {
                 text_block_ops.push(op.clone());
@@ -187,14 +617,16 @@ fn parse_into_components(
                 // Update text state
                 match operator {
                     "Tf" => {
+                        if let Some(Object::Name(font_name)) = op.operands.get(0) {
+                            state.font_name = Some(font_name.clone());
+                        }
                         if let Some(size) = extract_number(&op.operands, 1) {
                             state.font_size = size;
                         }
                     }
                     "Tm" => {
                         if let Some(matrix) = extract_matrix(&op.operands) {
-                            state.text_matrix = matrix;
-                            state.text_pos = (matrix[4], matrix[5]);
+                            state.set_text_matrix(matrix);
                         }
                     }
                     "Td" | "TD" => {
@@ -202,7 +634,38 @@ fn parse_into_components(
                             extract_number(&op.operands, 0),
                             extract_number(&op.operands, 1),
                         ) {
-                            state.text_pos = (state.text_pos.0 + tx, state.text_pos.1 + ty);
+                            state.translate_text_line_matrix(tx, ty);
+                            if operator == "TD" {
+                                state.leading = -ty;
+                            }
+                        }
+                    }
+                    "T*" => {
+                        state.move_to_next_line();
+                    }
+                    "Ts" => {
+                        if let Some(rise) = extract_number(&op.operands, 0) {
+                            state.text_rise = rise;
+                        }
+                    }
+                    "Tw" => {
+                        if let Some(space) = extract_number(&op.operands, 0) {
+                            state.word_spacing = space;
+                        }
+                    }
+                    "Tc" => {
+                        if let Some(space) = extract_number(&op.operands, 0) {
+                            state.char_spacing = space;
+                        }
+                    }
+                    "Tz" => {
+                        if let Some(scale) = extract_number(&op.operands, 0) {
+                            state.horiz_scaling = scale / 100.0;
+                        }
+                    }
+                    "TL" => {
+                        if let Some(leading) = extract_number(&op.operands, 0) {
+                            state.leading = leading;
                         }
                     }
                     _ => {}
@@ -330,16 +793,25 @@ fn parse_into_components(
                             }
                             XObjectType::Form => {
                                 #[cfg(debug_assertions)]
-                                eprintln!("[DEBUG] Processing Form XObject: {}", String::from_utf8_lossy(xobj_name));
+                                eprintln!(
+                                    "[DEBUG] Processing Form XObject: {}",
+                                    String::from_utf8_lossy(xobj_name)
+                                );
 
                                 // Calculate bbox for Form XObject with proper transformation
-                                let bbox = if let Ok(xobj_ref) = get_xobject_object_id(doc, resources_dict, xobj_name) {
+                                let bbox = if let Ok(xobj_ref) =
+                                    get_xobject_object_id(doc, resources_dict, xobj_name)
+                                {
                                     #[cfg(debug_assertions)]
                                     eprintln!("[DEBUG] Got XObject reference: {:?}", xobj_ref);
 
-                                    let result = calculate_form_xobject_bbox(doc, xobj_ref, &state.ctm);
+                                    let result =
+                                        calculate_form_xobject_bbox(doc, xobj_ref, &state.ctm);
                                     #[cfg(debug_assertions)]
-                                    eprintln!("[DEBUG] Form XObject bbox calculation result: {:?}", result);
+                                    eprintln!(
+                                        "[DEBUG] Form XObject bbox calculation result: {:?}",
+                                        result
+                                    );
                                     result
                                 } else {
                                     #[cfg(debug_assertions)]
@@ -401,8 +873,8 @@ fn parse_into_components(
             }
 
             // Color, line style, and other graphics state operators
-            "CS" | "cs" | "SC" | "SCN" | "sc" | "scn" | "G" | "g" | "RG" | "rg" | "K" | "k" |
-            "w" | "J" | "j" | "M" | "d" | "ri" | "i" | "gs" => {
+            "CS" | "cs" | "SC" | "SCN" | "sc" | "scn" | "G" | "g" | "RG" | "rg" | "K" | "k"
+            | "w" | "J" | "j" | "M" | "d" | "ri" | "i" | "gs" => {
                 graphics_state_ops.push(op.clone());
             }
 
@@ -413,33 +885,24 @@ fn parse_into_components(
 
             // Text showing operators that might appear outside BT/ET (invalid but happens)
             "Tj" | "TJ" | "'" | "\"" => {
-                // These are text operators that should be in BT/ET but sometimes aren't
-                // For now, we MUST keep these as they contain actual content
-                // TODO: Proper solution would calculate actual text bbox from font metrics
-
-                #[cfg(not(target_arch = "wasm32"))]
+                flush_graphics_ops(&mut components, &mut graphics_state_ops);
+                if let Some(component) =
+                    handle_orphan_text_operation(doc, resources, op, &mut state, &mut font_cache)
                 {
-                    eprintln!("[WARNING] Orphaned '{}' at ({:.1}, {:.1}) - keeping in stream",
-                        operator, state.text_pos.0, state.text_pos.1);
-                }
-
-                // Add to graphics state buffer to preserve the text
-                // We cannot filter these without proper font metrics
-                graphics_state_ops.push(op.clone());
-
-                // Update text position for ' and " operators which include line feed
-                if operator == "'" {
-                    // ' operator = T* + Tj (move to next line and show text)
-                    state.text_pos.1 -= state.font_size * 1.2; // Approximate line height
-                } else if operator == "\"" {
-                    // " operator = T* + Tw + Tc + Tj
-                    state.text_pos.1 -= state.font_size * 1.2;
+                    components.push(component);
+                } else {
+                    components.push(ContentComponent::GraphicsState {
+                        operators: vec![op.clone()],
+                    });
                 }
             }
 
             // Text state and font operators - track and keep
             "Tf" => {
                 // Font selection - update font size for text bbox estimation
+                if let Some(Object::Name(font_name)) = op.operands.get(0) {
+                    state.font_name = Some(font_name.clone());
+                }
                 if let Some(size) = extract_number(&op.operands, 1) {
                     state.font_size = size;
 
@@ -450,6 +913,34 @@ fn parse_into_components(
             }
 
             "Ts" | "Tz" | "TL" | "Tw" | "Tc" | "Tr" => {
+                match operator {
+                    "Ts" => {
+                        if let Some(rise) = extract_number(&op.operands, 0) {
+                            state.text_rise = rise;
+                        }
+                    }
+                    "Tz" => {
+                        if let Some(scale) = extract_number(&op.operands, 0) {
+                            state.horiz_scaling = scale / 100.0;
+                        }
+                    }
+                    "TL" => {
+                        if let Some(leading) = extract_number(&op.operands, 0) {
+                            state.leading = leading;
+                        }
+                    }
+                    "Tw" => {
+                        if let Some(space) = extract_number(&op.operands, 0) {
+                            state.word_spacing = space;
+                        }
+                    }
+                    "Tc" => {
+                        if let Some(space) = extract_number(&op.operands, 0) {
+                            state.char_spacing = space;
+                        }
+                    }
+                    _ => {}
+                }
                 graphics_state_ops.push(op.clone());
             }
 
@@ -457,12 +948,13 @@ fn parse_into_components(
             "Tm" => {
                 // Text matrix - sets absolute text position
                 if let Some(matrix) = extract_matrix(&op.operands) {
-                    state.text_matrix = matrix;
-                    state.text_pos = (matrix[4], matrix[5]);
+                    state.set_text_matrix(matrix);
 
                     #[cfg(not(target_arch = "wasm32"))]
-                    eprintln!("[DEBUG] Tm outside BT/ET: pos = ({:.1}, {:.1})",
-                        state.text_pos.0, state.text_pos.1);
+                    eprintln!(
+                        "[DEBUG] Tm outside BT/ET: pos = ({:.1}, {:.1})",
+                        state.text_pos.0, state.text_pos.1
+                    );
                 }
                 graphics_state_ops.push(op.clone());
             }
@@ -473,18 +965,23 @@ fn parse_into_components(
                     extract_number(&op.operands, 0),
                     extract_number(&op.operands, 1),
                 ) {
-                    state.text_pos = (state.text_pos.0 + tx, state.text_pos.1 + ty);
+                    state.translate_text_line_matrix(tx, ty);
+                    if operator == "TD" {
+                        state.leading = -ty;
+                    }
 
                     #[cfg(not(target_arch = "wasm32"))]
-                    eprintln!("[DEBUG] {} outside BT/ET: pos = ({:.1}, {:.1})",
-                        operator, state.text_pos.0, state.text_pos.1);
+                    eprintln!(
+                        "[DEBUG] {} outside BT/ET: pos = ({:.1}, {:.1})",
+                        operator, state.text_pos.0, state.text_pos.1
+                    );
                 }
                 graphics_state_ops.push(op.clone());
             }
 
             "T*" => {
                 // Move to start of next line
-                state.text_pos.1 -= state.font_size * 1.2; // Approximate line height
+                state.move_to_next_line();
                 graphics_state_ops.push(op.clone());
             }
 
@@ -530,28 +1027,214 @@ fn calculate_path_bbox(points: &[(f64, f64)]) -> Option<BoundingBox> {
         return None;
     }
 
-    let min_x = points.iter().map(|(x, _)| x).fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_x = points.iter().map(|(x, _)| x).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let min_y = points.iter().map(|(_, y)| y).fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_y = points.iter().map(|(_, y)| y).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min_x = points
+        .iter()
+        .map(|(x, _)| x)
+        .fold(f64::INFINITY, |a, &b| a.min(b));
+    let max_x = points
+        .iter()
+        .map(|(x, _)| x)
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min_y = points
+        .iter()
+        .map(|(_, y)| y)
+        .fold(f64::INFINITY, |a, &b| a.min(b));
+    let max_y = points
+        .iter()
+        .map(|(_, y)| y)
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     BoundingBox::new(min_x, min_y, max_x, max_y).ok()
+}
+
+fn handle_orphan_text_operation(
+    doc: &Document,
+    resources: Option<&Dictionary>,
+    op: &Operation,
+    state: &mut GraphicsState,
+    font_cache: &mut FontCache,
+) -> Option<ContentComponent> {
+    let operator = op.operator.as_str();
+    let font_name = match state.font_name.clone() {
+        Some(name) => name,
+        None => {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!(
+                "[WARNING] Orphaned '{}' encountered without active font - keeping in stream",
+                operator
+            );
+            return None;
+        }
+    };
+    let metrics = match font_cache.get(doc, resources, &font_name) {
+        Some(metrics) => metrics,
+        None => {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!(
+                "[WARNING] Could not load metrics for font '{}' - keeping orphaned text",
+                String::from_utf8_lossy(&font_name)
+            );
+            return None;
+        }
+    };
+
+    let advance = match operator {
+        "Tj" => measure_text_from_string(op.operands.get(0)?, &metrics, state)?,
+        "TJ" => {
+            let array = op.operands.get(0)?.as_array().ok()?;
+            measure_text_from_array(array, &metrics, state)?
+        }
+        "'" => {
+            state.move_to_next_line();
+            measure_text_from_string(op.operands.get(0)?, &metrics, state)?
+        }
+        "\"" => {
+            if let Some(space) = extract_number(&op.operands, 0) {
+                state.word_spacing = space;
+            }
+            if let Some(space) = extract_number(&op.operands, 1) {
+                state.char_spacing = space;
+            }
+            state.move_to_next_line();
+            measure_text_from_string(op.operands.get(2)?, &metrics, state)?
+        }
+        _ => return None,
+    };
+
+    let bbox = calculate_text_bbox_from_state(state, advance, &metrics);
+    if metrics.writing_mode == WritingMode::Vertical {
+        state.translate_text_matrix(0.0, -advance);
+    } else {
+        state.translate_text_matrix(advance, 0.0);
+    }
+
+    Some(ContentComponent::OrphanText {
+        operator: op.clone(),
+        bbox,
+    })
+}
+
+fn measure_text_from_string(
+    operand: &Object,
+    metrics: &FontMetrics,
+    state: &GraphicsState,
+) -> Option<f64> {
+    let bytes = extract_string_bytes(operand)?;
+    Some(measure_text_displacement(&bytes, metrics, state))
+}
+
+fn measure_text_from_array(
+    array: &[Object],
+    metrics: &FontMetrics,
+    state: &GraphicsState,
+) -> Option<f64> {
+    let mut width = 0.0;
+    for item in array {
+        match item {
+            Object::String(_, _) => {
+                let bytes = extract_string_bytes(item)?;
+                width += measure_text_displacement(&bytes, metrics, state);
+            }
+            Object::Integer(val) => {
+                width -= (*val as f64 / 1000.0) * state.font_size * state.horiz_scaling;
+            }
+            Object::Real(val) => {
+                width -= (*val as f64 / 1000.0) * state.font_size * state.horiz_scaling;
+            }
+            _ => {}
+        }
+    }
+    Some(width)
+}
+
+fn measure_text_displacement(bytes: &[u8], metrics: &FontMetrics, state: &GraphicsState) -> f64 {
+    let mut advance_total = 0.0;
+    let scale = state.horiz_scaling;
+    for code in decode_text_codes(bytes, metrics) {
+        let mut advance = (metrics.glyph_width(code) / 1000.0) * state.font_size;
+        advance += state.char_spacing;
+        if !metrics.is_cid && code == 32 {
+            advance += state.word_spacing;
+        }
+        advance_total += advance * scale;
+    }
+    advance_total
+}
+
+fn decode_text_codes(bytes: &[u8], metrics: &FontMetrics) -> Vec<u32> {
+    if metrics.is_cid {
+        let mut codes = Vec::new();
+        for chunk in bytes.chunks(metrics.bytes_per_char) {
+            if chunk.len() == metrics.bytes_per_char {
+                let mut value = 0u32;
+                for &b in chunk {
+                    value = (value << 8) | b as u32;
+                }
+                codes.push(value);
+            }
+        }
+        codes
+    } else {
+        bytes.iter().map(|b| *b as u32).collect()
+    }
+}
+
+fn extract_string_bytes(obj: &Object) -> Option<Vec<u8>> {
+    match obj {
+        Object::String(bytes, _) => Some(bytes.clone()),
+        _ => None,
+    }
+}
+
+fn calculate_text_bbox_from_state(
+    state: &GraphicsState,
+    advance: f64,
+    metrics: &FontMetrics,
+) -> Option<BoundingBox> {
+    if advance.abs() < f64::EPSILON {
+        return None;
+    }
+
+    let ascent = (metrics.ascent / 1000.0) * state.font_size + state.text_rise;
+    let descent = (metrics.descent / 1000.0) * state.font_size + state.text_rise;
+    let combined = state.combined_text_matrix();
+
+    let points = if metrics.writing_mode == WritingMode::Vertical {
+        let glyph_width = (ascent - descent).abs().max(state.font_size * 0.5);
+        let half_w = glyph_width / 2.0;
+        [
+            transform_point_with_matrix(&combined, -half_w, 0.0),
+            transform_point_with_matrix(&combined, half_w, 0.0),
+            transform_point_with_matrix(&combined, half_w, -advance),
+            transform_point_with_matrix(&combined, -half_w, -advance),
+        ]
+    } else {
+        [
+            transform_point_with_matrix(&combined, 0.0, descent),
+            transform_point_with_matrix(&combined, advance, descent),
+            transform_point_with_matrix(&combined, advance, ascent.max(descent + 0.1)),
+            transform_point_with_matrix(&combined, 0.0, ascent.max(descent + 0.1)),
+        ]
+    };
+
+    calculate_path_bbox(&points)
+}
+
+fn transform_point_with_matrix(matrix: &[f64; 6], x: f64, y: f64) -> (f64, f64) {
+    let [a, b, c, d, e, f] = matrix;
+    (a * x + c * y + e, b * x + d * y + f)
 }
 
 /// Calculate bounding box for image XObject placement
 /// Images are placed at (0,0)-(1,1) in user space, transformed by CTM
 fn calculate_image_bbox(ctm: &[f64; 6]) -> Option<BoundingBox> {
     // Image corners in user space: (0,0), (1,0), (1,1), (0,1)
-    let corners = [
-        (0.0, 0.0),
-        (1.0, 0.0),
-        (1.0, 1.0),
-        (0.0, 1.0),
-    ];
+    let corners = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
 
     // Transform corners by CTM
     let [a, b, c, d, e, f] = ctm;
-    let transformed: Vec<(f64, f64)> = corners.iter()
+    let transformed: Vec<(f64, f64)> = corners
+        .iter()
         .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f))
         .collect();
 
@@ -587,7 +1270,10 @@ fn calculate_form_xobject_bbox(
             if matrix_array.len() == 6 {
                 let mut m = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
                 for (i, val) in matrix_array.iter().enumerate() {
-                    m[i] = val.as_f32().unwrap_or(if i == 0 || i == 3 { 1.0 } else { 0.0 }) as f64;
+                    m[i] = val
+                        .as_f32()
+                        .unwrap_or(if i == 0 || i == 3 { 1.0 } else { 0.0 })
+                        as f64;
                 }
                 m
             } else {
@@ -604,18 +1290,12 @@ fn calculate_form_xobject_bbox(
     let combined_ctm = multiply_matrices(page_ctm, &matrix);
 
     // Transform the four corners of the BBox
-    let corners = [
-        (x1, y1),
-        (x2, y1),
-        (x2, y2),
-        (x1, y2),
-    ];
+    let corners = [(x1, y1), (x2, y1), (x2, y2), (x1, y2)];
 
     let [a, b, c, d, e, f] = combined_ctm;
-    let transformed: Vec<(f64, f64)> = corners.iter()
-        .map(|(x, y)| {
-            (a * x + c * y + e, b * x + d * y + f)
-        })
+    let transformed: Vec<(f64, f64)> = corners
+        .iter()
+        .map(|(x, y)| (a * x + c * y + e, b * x + d * y + f))
         .collect();
 
     calculate_path_bbox(&transformed)
@@ -655,7 +1335,10 @@ fn get_xobject_type(doc: &Document, resources: &Dictionary, xobj_name: &[u8]) ->
         return XObjectType::Unknown;
     }
 
-    let xobj_ref = xobject_dict.unwrap().get(xobj_name).ok()
+    let xobj_ref = xobject_dict
+        .unwrap()
+        .get(xobj_name)
+        .ok()
         .and_then(|obj| obj.as_reference().ok());
     if xobj_ref.is_none() {
         return XObjectType::Unknown;
@@ -672,7 +1355,11 @@ fn get_xobject_type(doc: &Document, resources: &Dictionary, xobj_name: &[u8]) ->
     }
 
     // Check Subtype
-    let subtype = xobj_stream.unwrap().dict.get(b"Subtype").ok()
+    let subtype = xobj_stream
+        .unwrap()
+        .dict
+        .get(b"Subtype")
+        .ok()
         .and_then(|obj| obj.as_name().ok());
 
     match subtype {
@@ -691,13 +1378,23 @@ fn filter_components(components: Vec<ContentComponent>, crop_box: &BoundingBox) 
         use wasm_bindgen::JsValue;
         web_sys::console::log_1(&JsValue::from_str(&format!(
             "[DEBUG] Filtering {} components with crop box: ({:.2}, {:.2}, {:.2}, {:.2})",
-            components.len(), crop_box.left, crop_box.bottom, crop_box.right, crop_box.top
+            components.len(),
+            crop_box.left,
+            crop_box.bottom,
+            crop_box.right,
+            crop_box.top
         )));
     }
 
     #[cfg(debug_assertions)]
-    eprintln!("[DEBUG] filter_components: {} components, crop: ({:.1}, {:.1}, {:.1}, {:.1})",
-        components.len(), crop_box.left, crop_box.bottom, crop_box.right, crop_box.top);
+    eprintln!(
+        "[DEBUG] filter_components: {} components, crop: ({:.1}, {:.1}, {:.1}, {:.1})",
+        components.len(),
+        crop_box.left,
+        crop_box.bottom,
+        crop_box.right,
+        crop_box.top
+    );
 
     let mut output = Vec::new();
     let mut stats = ComponentStats::default();
@@ -754,7 +1451,7 @@ fn filter_components(components: Vec<ContentComponent>, crop_box: &BoundingBox) 
                     {
                         use wasm_bindgen::JsValue;
                         web_sys::console::log_1(&JsValue::from_str(
-                            "[DEBUG] Keeping Form XObject (no bbox calculated)"
+                            "[DEBUG] Keeping Form XObject (no bbox calculated)",
                         ));
                     }
                     output.push(operator);
@@ -798,13 +1495,41 @@ fn filter_components(components: Vec<ContentComponent>, crop_box: &BoundingBox) 
                             use wasm_bindgen::JsValue;
                             web_sys::console::log_1(&JsValue::from_str(&format!(
                                 "[DEBUG] Removing image outside bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
-                                image_bbox.left, image_bbox.bottom, image_bbox.right, image_bbox.top
+                                image_bbox.left,
+                                image_bbox.bottom,
+                                image_bbox.right,
+                                image_bbox.top
                             )));
                         }
                     }
                 } else {
                     // No bbox calculated - keep to be safe
                     stats.images_kept += 1;
+                    output.push(operator);
+                }
+            }
+            ContentComponent::OrphanText { operator, bbox } => {
+                stats.orphan_text_total += 1;
+                if let Some(text_bbox) = bbox {
+                    if has_overlap(&text_bbox, crop_box, SAFETY_MARGIN) {
+                        stats.orphan_text_kept += 1;
+                        output.push(operator);
+                    } else {
+                        #[cfg(target_arch = "wasm32")]
+                        {
+                            use wasm_bindgen::JsValue;
+                            web_sys::console::log_1(&JsValue::from_str(&format!(
+                                "[DEBUG] Removing orphan text outside bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                                text_bbox.left,
+                                text_bbox.bottom,
+                                text_bbox.right,
+                                text_bbox.top
+                            )));
+                        }
+                    }
+                } else {
+                    // Missing bbox (e.g., font metrics unavailable) - keep to be safe
+                    stats.orphan_text_kept += 1;
                     output.push(operator);
                 }
             }
@@ -815,10 +1540,11 @@ fn filter_components(components: Vec<ContentComponent>, crop_box: &BoundingBox) 
     {
         use wasm_bindgen::JsValue;
         web_sys::console::log_1(&JsValue::from_str(&format!(
-            "[DEBUG] Component stats: {} text blocks, {} graphics state, {} form XObjects, {}/{} paths kept, {}/{} images kept",
+            "[DEBUG] Component stats: {} text blocks, {} graphics state, {} form XObjects, {}/{} paths kept, {}/{} images kept, {}/{} orphan text kept",
             stats.text_blocks, stats.graphics_state, stats.form_xobjects,
             stats.paths_kept, stats.paths_total,
-            stats.images_kept, stats.images_total
+            stats.images_kept, stats.images_total,
+            stats.orphan_text_kept, stats.orphan_text_total
         )));
         web_sys::console::log_1(&JsValue::from_str(&format!(
             "[DEBUG] Final output: {} operators",
@@ -838,6 +1564,8 @@ struct ComponentStats {
     paths_kept: usize,
     images_total: usize,
     images_kept: usize,
+    orphan_text_total: usize,
+    orphan_text_kept: usize,
 }
 
 /// Check if two bounding boxes have any overlap (with safety margin)
@@ -853,10 +1581,10 @@ fn has_overlap(component_bbox: &BoundingBox, crop_box: &BoundingBox, margin: f64
     let top = crop_box.top + actual_margin;
 
     // Check if bboxes overlap (not just touch)
-    !(component_bbox.right < left ||
-      component_bbox.left > right ||
-      component_bbox.top < bottom ||
-      component_bbox.bottom > top)
+    !(component_bbox.right < left
+        || component_bbox.left > right
+        || component_bbox.top < bottom
+        || component_bbox.bottom > top)
 }
 
 /// Filter content stream to remove operations outside the crop box
@@ -920,7 +1648,7 @@ pub fn filter_content_stream(
                 }
             }
             c
-        },
+        }
         Err(e) => {
             #[cfg(debug_assertions)]
             eprintln!("[DEBUG] Content::decode failed: {:?}", e);
@@ -957,7 +1685,8 @@ pub fn filter_content_stream(
             let op = &content.operations[0];
             web_sys::console::log_1(&JsValue::from_str(&format!(
                 "[DEBUG] Single operation: '{}' with {} operands",
-                op.operator, op.operands.len()
+                op.operator,
+                op.operands.len()
             )));
 
             // Show raw bytes for debugging single-op streams
@@ -974,29 +1703,56 @@ pub fn filter_content_stream(
     // Non-WASM debug logging
     #[cfg(not(target_arch = "wasm32"))]
     {
-        eprintln!("[DEBUG] Content stream has {} operations", content.operations.len());
+        eprintln!(
+            "[DEBUG] Content stream has {} operations",
+            content.operations.len()
+        );
         if content.operations.len() == 1 {
             let op = &content.operations[0];
-            eprintln!("[DEBUG] Single op: '{}', operands: {:?}", op.operator, op.operands);
+            eprintln!(
+                "[DEBUG] Single op: '{}', operands: {:?}",
+                op.operator, op.operands
+            );
             if let Some(Object::Name(name)) = op.operands.first() {
-                eprintln!("[DEBUG] First operand is Name: {}", String::from_utf8_lossy(name));
+                eprintln!(
+                    "[DEBUG] First operand is Name: {}",
+                    String::from_utf8_lossy(name)
+                );
             }
         } else if content.operations.len() > 0 {
             // Check if stream starts with text operators (potential issue)
             let first_op = &content.operations[0];
             if matches!(first_op.operator.as_str(), "Tj" | "TJ" | "'" | "\"") {
-                eprintln!("[WARNING] Stream starts with text operator '{}' without BT!", first_op.operator);
-                eprintln!("[WARNING] This is invalid PDF - text operators should be inside BT/ET blocks");
+                eprintln!(
+                    "[WARNING] Stream starts with text operator '{}' without BT!",
+                    first_op.operator
+                );
+                eprintln!(
+                    "[WARNING] This is invalid PDF - text operators should be inside BT/ET blocks"
+                );
             }
 
             // Count BT/ET pairs
-            let bt_count = content.operations.iter().filter(|op| op.operator == "BT").count();
-            let et_count = content.operations.iter().filter(|op| op.operator == "ET").count();
-            let text_ops_count = content.operations.iter()
+            let bt_count = content
+                .operations
+                .iter()
+                .filter(|op| op.operator == "BT")
+                .count();
+            let et_count = content
+                .operations
+                .iter()
+                .filter(|op| op.operator == "ET")
+                .count();
+            let text_ops_count = content
+                .operations
+                .iter()
                 .filter(|op| matches!(op.operator.as_str(), "Tj" | "TJ" | "'" | "\""))
                 .count();
 
-            eprintln!("[DEBUG] BT: {}, ET: {}, Text ops: {}", bt_count, et_count, text_ops_count);
+            eprintln!(
+                "[DEBUG] BT: {}, ET: {}, Text ops: {}",
+                bt_count, et_count, text_ops_count
+            );
 
             if content.operations.len() <= 10 {
                 // Show first few operators for small streams
@@ -1018,23 +1774,35 @@ pub fn filter_content_stream(
             match comp {
                 ContentComponent::Path { bbox, .. } => {
                     if let Some(b) = bbox {
-                        eprintln!("[DEBUG] Component {} (Path): bbox=({:.1},{:.1},{:.1},{:.1})",
-                            i, b.left, b.bottom, b.right, b.top);
+                        eprintln!(
+                            "[DEBUG] Component {} (Path): bbox=({:.1},{:.1},{:.1},{:.1})",
+                            i, b.left, b.bottom, b.right, b.top
+                        );
                     }
                 }
                 ContentComponent::FormXObject { bbox, .. } => {
                     if let Some(b) = bbox {
-                        eprintln!("[DEBUG] Component {} (FormXObject): bbox=({:.1},{:.1},{:.1},{:.1})",
-                            i, b.left, b.bottom, b.right, b.top);
+                        eprintln!(
+                            "[DEBUG] Component {} (FormXObject): bbox=({:.1},{:.1},{:.1},{:.1})",
+                            i, b.left, b.bottom, b.right, b.top
+                        );
                     } else {
                         eprintln!("[DEBUG] Component {} (FormXObject): no bbox", i);
                     }
                 }
                 ContentComponent::TextBlock { operators } => {
-                    eprintln!("[DEBUG] Component {} (TextBlock): {} ops", i, operators.len());
+                    eprintln!(
+                        "[DEBUG] Component {} (TextBlock): {} ops",
+                        i,
+                        operators.len()
+                    );
                 }
                 ContentComponent::GraphicsState { operators } => {
-                    eprintln!("[DEBUG] Component {} (GraphicsState): {} ops", i, operators.len());
+                    eprintln!(
+                        "[DEBUG] Component {} (GraphicsState): {} ops",
+                        i,
+                        operators.len()
+                    );
                 }
                 _ => {}
             }
@@ -1057,7 +1825,9 @@ pub fn filter_content_stream(
 
         // IMPORTANT: If nothing was filtered, return original bytes to avoid re-encoding issues
         if removed_count == 0 {
-            web_sys::console::log_1(&JsValue::from_str("[DEBUG] No operations removed - keeping original content stream"));
+            web_sys::console::log_1(&JsValue::from_str(
+                "[DEBUG] No operations removed - keeping original content stream",
+            ));
             return Ok((decoded_bytes, vec![]));
         }
     }
@@ -1102,17 +1872,20 @@ fn get_xobject_object_id(
 ) -> Result<ObjectId> {
     // Look up XObject in Resources
     let xobject_ref = resources.get(b"XObject")?;
-    let xobject_dict = xobject_ref.as_dict()
+    let xobject_dict = xobject_ref
+        .as_dict()
         .map_err(|_| Error::PdfParse("XObject is not a dictionary".to_string()))?;
 
     let xobj_ref = xobject_dict
         .get(xobj_name)
         .ok()
         .and_then(|obj| obj.as_reference().ok())
-        .ok_or_else(|| Error::PdfParse(format!(
-            "XObject {} not found in Resources",
-            String::from_utf8_lossy(xobj_name)
-        )))?;
+        .ok_or_else(|| {
+            Error::PdfParse(format!(
+                "XObject {} not found in Resources",
+                String::from_utf8_lossy(xobj_name)
+            ))
+        })?;
 
     Ok(xobj_ref)
 }
@@ -1126,17 +1899,20 @@ fn get_form_xobject_ref(
 ) -> Result<(ObjectId, Option<Dictionary>)> {
     // Look up XObject in Resources
     let xobject_ref = resources.get(b"XObject")?;
-    let xobject_dict = xobject_ref.as_dict()
+    let xobject_dict = xobject_ref
+        .as_dict()
         .map_err(|_| Error::PdfParse("XObject is not a dictionary".to_string()))?;
 
     let xobj_ref = xobject_dict
         .get(xobj_name)
         .ok()
         .and_then(|obj| obj.as_reference().ok())
-        .ok_or_else(|| Error::PdfParse(format!(
-            "XObject {} not found in Resources",
-            String::from_utf8_lossy(xobj_name)
-        )))?;
+        .ok_or_else(|| {
+            Error::PdfParse(format!(
+                "XObject {} not found in Resources",
+                String::from_utf8_lossy(xobj_name)
+            ))
+        })?;
 
     // Get the XObject stream to check if it's a Form
     let xobj_stream = doc
@@ -1146,7 +1922,9 @@ fn get_form_xobject_ref(
         .map_err(|e| Error::PdfParse(format!("XObject is not a stream: {}", e)))?;
 
     // Check if it's a Form XObject (Subtype = Form)
-    let is_form = xobj_stream.dict.get(b"Subtype")
+    let is_form = xobj_stream
+        .dict
+        .get(b"Subtype")
         .ok()
         .and_then(|obj| obj.as_name().ok())
         .map(|name| name == b"Form")
@@ -1158,7 +1936,9 @@ fn get_form_xobject_ref(
     }
 
     // Get Form XObject's Resources (it may have its own)
-    let form_resources = xobj_stream.dict.get(b"Resources")
+    let form_resources = xobj_stream
+        .dict
+        .get(b"Resources")
         .ok()
         .and_then(|obj| obj.as_dict().ok())
         .map(|d| d.clone());
@@ -1191,7 +1971,8 @@ pub fn filter_form_xobject(
     }
 
     // Filter the Form XObject's content stream (returns nested Form XObjects)
-    let (filtered_content, nested_form_xobjects) = filter_content_stream(doc, xobj_stream, xobj_resources.as_ref(), crop_box)?;
+    let (filtered_content, nested_form_xobjects) =
+        filter_content_stream(doc, xobj_stream, xobj_resources.as_ref(), crop_box)?;
 
     // Update the Form XObject's content
     let xobj_stream_mut = doc
@@ -1382,9 +2163,7 @@ fn filter_operations(
             }
 
             // Color operators - always keep
-            "CS" | "cs" | "SC" | "SCN" | "sc" | "scn" | "G" | "g" | "RG" | "rg" | "K" | "k" => {
-                true
-            }
+            "CS" | "cs" | "SC" | "SCN" | "sc" | "scn" | "G" | "g" | "RG" | "rg" | "K" | "k" => true,
 
             // XObject operator - collect Form XObjects for later filtering
             "Do" => {
@@ -1392,7 +2171,9 @@ fn filter_operations(
                 if let Some(Object::Name(xobj_name)) = op.operands.first() {
                     if let Some(resources_dict) = resources {
                         // Try to get the XObject reference
-                        if let Ok((xobj_id, xobj_resources)) = get_form_xobject_ref(doc, resources_dict, xobj_name) {
+                        if let Ok((xobj_id, xobj_resources)) =
+                            get_form_xobject_ref(doc, resources_dict, xobj_name)
+                        {
                             form_xobjects.push((xobj_id, xobj_resources));
                         }
                     }
@@ -1426,7 +2207,11 @@ fn filter_operations(
             // Non-WASM debug logging
             #[cfg(not(target_arch = "wasm32"))]
             {
-                eprintln!("[DEBUG] Filtered out: {} (operands: {})", operator, op.operands.len());
+                eprintln!(
+                    "[DEBUG] Filtered out: {} (operands: {})",
+                    operator,
+                    op.operands.len()
+                );
             }
         }
     }
@@ -1506,10 +2291,22 @@ fn path_intersects_box(path: &[(f64, f64)], bbox: &BoundingBox) -> bool {
     }
 
     // Compute bounding box of the path
-    let min_x = path.iter().map(|(x, _)| x).fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_x = path.iter().map(|(x, _)| x).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-    let min_y = path.iter().map(|(_, y)| y).fold(f64::INFINITY, |a, &b| a.min(b));
-    let max_y = path.iter().map(|(_, y)| y).fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min_x = path
+        .iter()
+        .map(|(x, _)| x)
+        .fold(f64::INFINITY, |a, &b| a.min(b));
+    let max_x = path
+        .iter()
+        .map(|(x, _)| x)
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
+    let min_y = path
+        .iter()
+        .map(|(_, y)| y)
+        .fold(f64::INFINITY, |a, &b| a.min(b));
+    let max_y = path
+        .iter()
+        .map(|(_, y)| y)
+        .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     // Check if path bounding box intersects with crop box
     !(max_x < bbox.left || min_x > bbox.right || max_y < bbox.bottom || min_y > bbox.top)
@@ -1548,7 +2345,8 @@ mod tests {
     fn test_extract_number() {
         let operands = vec![Object::Integer(42), Object::Real(3.14)];
         assert_eq!(extract_number(&operands, 0), Some(42.0));
-        assert_eq!(extract_number(&operands, 1), Some(3.14));
+        let real_value = extract_number(&operands, 1).unwrap();
+        assert!((real_value - 3.14).abs() < 1e-6);
         assert_eq!(extract_number(&operands, 2), None);
     }
 }

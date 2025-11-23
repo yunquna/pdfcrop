@@ -109,14 +109,20 @@ fn main() -> Result<()> {
     };
 
     if args.verbose || args.debug {
-        eprintln!("Input: {}", if args.input == "-" { "stdin" } else { &args.input });
+        eprintln!(
+            "Input: {}",
+            if args.input == "-" {
+                "stdin"
+            } else {
+                &args.input
+            }
+        );
         eprintln!("Output: {}", output_path);
     }
 
     // Parse margins
     let margins = if let Some(margin_str) = args.margins {
-        Margins::from_str(&margin_str)
-            .map_err(|e| anyhow::anyhow!("Invalid margins: {}", e))?
+        Margins::from_str(&margin_str).map_err(|e| anyhow::anyhow!("Invalid margins: {}", e))?
     } else {
         Margins::none()
     };
@@ -130,10 +136,7 @@ fn main() -> Result<()> {
 
     // Parse bounding box overrides
     let bbox_override = if let Some(bbox_str) = args.bbox {
-        Some(
-            BoundingBox::from_str(&bbox_str)
-                .map_err(|e| anyhow::anyhow!("Invalid bbox: {}", e))?,
-        )
+        Some(BoundingBox::from_str(&bbox_str).map_err(|e| anyhow::anyhow!("Invalid bbox: {}", e))?)
     } else {
         None
     };
@@ -162,11 +165,11 @@ fn main() -> Result<()> {
         bbox_override,
         bbox_odd,
         bbox_even,
-        page_bboxes: None,  // Per-page bbox (not exposed in CLI yet)
-        page_range: None,   // Page range selection (not exposed in CLI yet)
+        page_bboxes: None, // Per-page bbox (not exposed in CLI yet)
+        page_range: None,  // Page range selection (not exposed in CLI yet)
         bbox_method: pdfcrop::BBoxMethod::ContentStream, // Pure Rust, WASM-compatible
         verbose: args.verbose || args.debug,
-        clip_content: args.clip,  // Opt-in to content clipping
+        clip_content: args.clip, // Opt-in to content clipping
         shrink_to_content: args.shrink_to_content,
     };
 
@@ -175,8 +178,7 @@ fn main() -> Result<()> {
         eprintln!("\nCropping PDF...");
     }
 
-    let cropped_data = crop_pdf(&input_data, options)
-        .context("Failed to crop PDF")?;
+    let cropped_data = crop_pdf(&input_data, options).context("Failed to crop PDF")?;
 
     // Write output
     if args.verbose {

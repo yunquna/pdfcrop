@@ -110,12 +110,15 @@ fn process_pdf(url: &str) -> Result<ProcessResult, Box<dyn std::error::Error>> {
 
     let original_size = pdf_bytes.len();
     let cropped_size = cropped.len();
-    let size_change_pct = ((cropped_size as i64 - original_size as i64) as f64
-        / original_size as f64) * 100.0;
+    let size_change_pct =
+        ((cropped_size as i64 - original_size as i64) as f64 / original_size as f64) * 100.0;
 
     println!("✓ Cropped successfully!");
     println!("  Original: {} bytes", original_size);
-    println!("  Cropped:  {} bytes ({:+.1}%)", cropped_size, size_change_pct);
+    println!(
+        "  Cropped:  {} bytes ({:+.1}%)",
+        cropped_size, size_change_pct
+    );
     println!("  Output:   {}", output_file);
 
     Ok(ProcessResult {
@@ -159,8 +162,10 @@ fn print_summary(results: &[ProcessResult]) {
     if successful > 0 {
         println!("✓ Successfully cropped:");
         for result in results.iter().filter(|r| r.success) {
-            let size_change_pct = ((result.cropped_size as i64 - result.original_size as i64) as f64
-                / result.original_size as f64) * 100.0;
+            let size_change_pct = ((result.cropped_size as i64 - result.original_size as i64)
+                as f64
+                / result.original_size as f64)
+                * 100.0;
             println!("  • {} ({:+.1}%)", result.filename, size_change_pct);
         }
         println!();
@@ -169,7 +174,11 @@ fn print_summary(results: &[ProcessResult]) {
     if failed > 0 {
         println!("✗ Failed:");
         for result in results.iter().filter(|r| !r.success) {
-            println!("  • {} - {}", result.url, result.error.as_deref().unwrap_or("Unknown error"));
+            println!(
+                "  • {} - {}",
+                result.url,
+                result.error.as_deref().unwrap_or("Unknown error")
+            );
         }
         println!();
     }
@@ -190,9 +199,7 @@ fn download_pdf(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     use reqwest::blocking::Client;
     use std::time::Duration;
 
-    let client = Client::builder()
-        .timeout(Duration::from_secs(30))
-        .build()?;
+    let client = Client::builder().timeout(Duration::from_secs(30)).build()?;
 
     let response = client
         .get(url)
@@ -210,7 +217,10 @@ fn download_pdf(url: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         .unwrap_or("");
 
     if !content_type.contains("pdf") && !content_type.is_empty() {
-        eprintln!("Warning: Content-Type is '{}', expected 'application/pdf'", content_type);
+        eprintln!(
+            "Warning: Content-Type is '{}', expected 'application/pdf'",
+            content_type
+        );
     }
 
     let bytes = response.bytes()?.to_vec();

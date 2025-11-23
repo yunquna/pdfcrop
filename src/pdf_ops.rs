@@ -11,7 +11,12 @@ use lopdf::{Document, Object};
 ///
 /// If `clip_content` is true, also adds a clipping path to the content stream
 /// to actually remove/hide content outside the bbox.
-pub fn apply_cropbox(doc: &mut Document, page_num: usize, bbox: &BoundingBox, clip_content: bool) -> Result<()> {
+pub fn apply_cropbox(
+    doc: &mut Document,
+    page_num: usize,
+    bbox: &BoundingBox,
+    clip_content: bool,
+) -> Result<()> {
     // Get the page ID
     let page_id = doc
         .page_iter()
@@ -69,7 +74,8 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
             .map_err(|e| Error::PdfParse(format!("page is not a dictionary: {}", e)))?;
 
         // Clone the page's Resources (needed for Form XObject lookup)
-        let resources = page.get(b"Resources")
+        let resources = page
+            .get(b"Resources")
             .ok()
             .and_then(|obj| obj.as_dict().ok())
             .map(|d| d.clone());
@@ -100,7 +106,8 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
                 .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
 
             // Filter the content stream (collects Form XObjects for second pass)
-            let (filtered_content, form_xobjects) = filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
+            let (filtered_content, form_xobjects) =
+                filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
             all_form_xobjects.extend(form_xobjects);
 
             // Update the stream with filtered content
@@ -144,7 +151,8 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
                         .as_stream()
                         .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
 
-                    let (filtered_content, form_xobjects) = filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
+                    let (filtered_content, form_xobjects) =
+                        filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
                     all_form_xobjects.extend(form_xobjects);
 
                     let stream_mut = doc

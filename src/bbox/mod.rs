@@ -241,9 +241,9 @@ mod tests {
         let bbox2 = BoundingBox::new(5.0, 30.0, 90.0, 210.0).unwrap();
         let union = bbox1.union(&bbox2);
 
-        assert_eq!(union.left, 5.0);   // min of 10 and 5
+        assert_eq!(union.left, 5.0); // min of 10 and 5
         assert_eq!(union.bottom, 20.0); // min of 20 and 30
         assert_eq!(union.right, 100.0); // max of 100 and 90
-        assert_eq!(union.top, 210.0);   // max of 200 and 210
+        assert_eq!(union.top, 210.0); // max of 200 and 210
     }
 }

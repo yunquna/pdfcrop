@@ -2,9 +2,9 @@
 //!
 //! This module provides JavaScript-accessible functions for PDF cropping in web browsers.
 
-use wasm_bindgen::prelude::*;
 use js_sys::{Array, Object};
 use std::collections::HashMap;
+use wasm_bindgen::prelude::*;
 
 use crate::{crop_pdf, BBoxMethod, BoundingBox, CropOptions, Margins, PageRange};
 
@@ -14,8 +14,7 @@ pub fn init() {
     console_error_panic_hook::set_once();
     // Only show logs from pdfcrop, not from dependencies like hayro (which spams thousands of debug logs)
     wasm_logger::init(
-        wasm_logger::Config::default()
-            .module_prefix("pdfcrop")  // Only log from pdfcrop modules
+        wasm_logger::Config::default().module_prefix("pdfcrop"), // Only log from pdfcrop modules
     );
 }
 
@@ -33,7 +32,12 @@ pub struct WasmBoundingBox {
 impl WasmBoundingBox {
     #[wasm_bindgen(constructor)]
     pub fn new(left: f64, bottom: f64, right: f64, top: f64) -> Self {
-        WasmBoundingBox { left, bottom, right, top }
+        WasmBoundingBox {
+            left,
+            bottom,
+            right,
+            top,
+        }
     }
 
     #[wasm_bindgen(getter)]
@@ -152,19 +156,24 @@ pub fn crop_pdf_wasm(
             let pair = js_sys::Array::from(&entry);
             // Parse page number from string key (Object keys are always strings in JS)
             let page_num_str = pair.get(0).as_string().ok_or("Invalid page number")?;
-            let page_num = page_num_str.parse::<usize>()
+            let page_num = page_num_str
+                .parse::<usize>()
                 .map_err(|_| JsValue::from_str("Invalid page number"))?;
             let bbox_obj = pair.get(1);
 
             // Extract bbox fields from JS object
             let left = js_sys::Reflect::get(&bbox_obj, &"left".into())?
-                .as_f64().ok_or("Invalid bbox.left")?;
+                .as_f64()
+                .ok_or("Invalid bbox.left")?;
             let bottom = js_sys::Reflect::get(&bbox_obj, &"bottom".into())?
-                .as_f64().ok_or("Invalid bbox.bottom")?;
+                .as_f64()
+                .ok_or("Invalid bbox.bottom")?;
             let right = js_sys::Reflect::get(&bbox_obj, &"right".into())?
-                .as_f64().ok_or("Invalid bbox.right")?;
+                .as_f64()
+                .ok_or("Invalid bbox.right")?;
             let top = js_sys::Reflect::get(&bbox_obj, &"top".into())?
-                .as_f64().ok_or("Invalid bbox.top")?;
+                .as_f64()
+                .ok_or("Invalid bbox.top")?;
 
             let bbox = BoundingBox::new(left, bottom, right, top)
                 .map_err(|e| JsValue::from_str(&e.to_string()))?;
@@ -207,8 +216,7 @@ pub fn crop_pdf_wasm(
     };
 
     // Perform the crop
-    crop_pdf(pdf_bytes, crop_options)
-        .map_err(|e| JsValue::from_str(&e.to_string()))
+    crop_pdf(pdf_bytes, crop_options).map_err(|e| JsValue::from_str(&e.to_string()))
 }
 
 /// Get the number of pages in a PDF
@@ -231,10 +239,7 @@ pub fn get_page_count_wasm(pdf_bytes: &[u8]) -> Result<usize, JsValue> {
 /// # Returns
 /// WasmBoundingBox with detected bounds
 #[wasm_bindgen(js_name = detectBbox)]
-pub fn detect_bbox_wasm(
-    pdf_bytes: &[u8],
-    page_num: usize,
-) -> Result<WasmBoundingBox, JsValue> {
+pub fn detect_bbox_wasm(pdf_bytes: &[u8], page_num: usize) -> Result<WasmBoundingBox, JsValue> {
     use crate::bbox::detect_bbox_by_rendering;
 
     let bbox = detect_bbox_by_rendering(pdf_bytes, page_num, Some(72.0))
@@ -252,10 +257,7 @@ pub fn detect_bbox_wasm(
 /// # Returns
 /// Object with {width, height} in PDF points
 #[wasm_bindgen(js_name = getPageDimensions)]
-pub fn get_page_dimensions_wasm(
-    pdf_bytes: &[u8],
-    page_num: usize,
-) -> Result<JsValue, JsValue> {
+pub fn get_page_dimensions_wasm(pdf_bytes: &[u8], page_num: usize) -> Result<JsValue, JsValue> {
     use lopdf::Document;
 
     let doc = Document::load_mem(pdf_bytes)
@@ -287,5 +289,7 @@ pub fn render_page_to_png_wasm(
 ) -> Result<Vec<u8>, JsValue> {
     // This will be implemented after we add the render_page_to_png function
     // to the main crate
-    Err(JsValue::from_str("Not yet implemented - will be added in next phase"))
+    Err(JsValue::from_str(
+        "Not yet implemented - will be added in next phase",
+    ))
 }
