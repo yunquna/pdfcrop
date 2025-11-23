@@ -29,6 +29,7 @@
 //! ```
 
 pub mod bbox;
+pub mod content_filter;
 pub mod crop;
 pub mod error;
 #[cfg(not(target_arch = "wasm32"))]
