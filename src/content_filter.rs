@@ -478,6 +478,8 @@ enum ContentComponent {
     Path {
         operators: Vec<Operation>,
         bbox: Option<BoundingBox>,
+        /// True if the path modifies the clipping path (contains W/W*)
+        is_clipping: bool,
     },
     /// Image XObject (Do operator with Image type)
     ImageXObject {
@@ -555,6 +557,7 @@ fn parse_into_components(
     let mut path_buffer: Vec<Operation> = Vec::new();
     let mut path_points: Vec<(f64, f64)> = Vec::new();
     let mut path_start = (0.0, 0.0);
+    let mut current_point: Option<(f64, f64)> = None;
     let mut in_text_block = false;
     let mut text_block_ops: Vec<Operation> = Vec::new();
     let mut graphics_state_ops: Vec<Operation> = Vec::new();
@@ -692,51 +695,116 @@ fn parse_into_components(
                             extract_number(&op.operands, 1),
                         ) {
                             let pos = state.transform_point(x, y);
-                            path_points.clear();
-                            path_points.push(pos);
-                            path_start = pos;
-                        }
-                    }
-                    "l" => {
-                        if let (Some(x), Some(y)) = (
-                            extract_number(&op.operands, 0),
-                            extract_number(&op.operands, 1),
-                        ) {
-                            path_points.push(state.transform_point(x, y));
-                        }
-                    }
-                    "c" | "v" | "y" => {
-                        if op.operands.len() >= 2 {
-                            if let (Some(x), Some(y)) = (
-                                extract_number(&op.operands, op.operands.len() - 2),
-                                extract_number(&op.operands, op.operands.len() - 1),
-                            ) {
-                                path_points.push(state.transform_point(x, y));
+                    path_points.clear();
+                    path_points.push(pos);
+                    path_start = pos;
+                    current_point = Some(pos);
+                }
+            }
+            "l" => {
+                if let (Some(x), Some(y)) = (
+                    extract_number(&op.operands, 0),
+                    extract_number(&op.operands, 1),
+                ) {
+                    path_points.push(state.transform_point(x, y));
+                    current_point = Some(state.transform_point(x, y));
+                }
+            }
+            "c" | "v" | "y" => {
+                // Cubic Bezier curve - include control points and extrema for bbox
+                let p0 = current_point;
+                match operator {
+                    "c" => {
+                        if op.operands.len() >= 6 {
+                            let p1 = state.transform_point(
+                                extract_number(&op.operands, 0).unwrap_or(0.0),
+                                extract_number(&op.operands, 1).unwrap_or(0.0),
+                            );
+                            let p2 = state.transform_point(
+                                extract_number(&op.operands, 2).unwrap_or(0.0),
+                                extract_number(&op.operands, 3).unwrap_or(0.0),
+                            );
+                            let p3 = state.transform_point(
+                                extract_number(&op.operands, 4).unwrap_or(0.0),
+                                extract_number(&op.operands, 5).unwrap_or(0.0),
+                            );
+                            if let Some(start) = p0 {
+                                extend_path_with_cubic_points(&mut path_points, start, p1, p2, p3);
+                            } else {
+                                path_points.push(p1);
+                                path_points.push(p2);
+                                path_points.push(p3);
                             }
+                            current_point = Some(p3);
                         }
                     }
-                    "re" => {
-                        if let (Some(x), Some(y), Some(w), Some(h)) = (
-                            extract_number(&op.operands, 0),
-                            extract_number(&op.operands, 1),
-                            extract_number(&op.operands, 2),
-                            extract_number(&op.operands, 3),
-                        ) {
-                            path_points.clear();
-                            path_points.push(state.transform_point(x, y));
-                            path_points.push(state.transform_point(x + w, y));
-                            path_points.push(state.transform_point(x + w, y + h));
-                            path_points.push(state.transform_point(x, y + h));
+                    "v" => {
+                        if op.operands.len() >= 4 {
+                            let p1 = p0.unwrap_or((0.0, 0.0)); // first control is current point
+                            let p2 = state.transform_point(
+                                extract_number(&op.operands, 0).unwrap_or(0.0),
+                                extract_number(&op.operands, 1).unwrap_or(0.0),
+                            );
+                            let p3 = state.transform_point(
+                                extract_number(&op.operands, 2).unwrap_or(0.0),
+                                extract_number(&op.operands, 3).unwrap_or(0.0),
+                            );
+                            if let Some(start) = p0 {
+                                extend_path_with_cubic_points(&mut path_points, start, p1, p2, p3);
+                            } else {
+                                path_points.push(p2);
+                                path_points.push(p3);
+                            }
+                            current_point = Some(p3);
                         }
                     }
-                    "h" => {
-                        if !path_points.is_empty() {
-                            path_points.push(path_start);
+                    "y" => {
+                        if op.operands.len() >= 4 {
+                            let p1 = state.transform_point(
+                                extract_number(&op.operands, 0).unwrap_or(0.0),
+                                extract_number(&op.operands, 1).unwrap_or(0.0),
+                            );
+                            let p3 = state.transform_point(
+                                extract_number(&op.operands, 2).unwrap_or(0.0),
+                                extract_number(&op.operands, 3).unwrap_or(0.0),
+                            );
+                            let p2 = p3; // second control is the endpoint for 'y'
+                            if let Some(start) = p0 {
+                                extend_path_with_cubic_points(&mut path_points, start, p1, p2, p3);
+                            } else {
+                                path_points.push(p1);
+                                path_points.push(p3);
+                            }
+                            current_point = Some(p3);
                         }
                     }
                     _ => {}
                 }
             }
+            "re" => {
+                if let (Some(x), Some(y), Some(w), Some(h)) = (
+                    extract_number(&op.operands, 0),
+                    extract_number(&op.operands, 1),
+                    extract_number(&op.operands, 2),
+                    extract_number(&op.operands, 3),
+                ) {
+                    path_points.clear();
+                    path_points.push(state.transform_point(x, y));
+                    path_points.push(state.transform_point(x + w, y));
+                    path_points.push(state.transform_point(x + w, y + h));
+                    path_points.push(state.transform_point(x, y + h));
+                    current_point = Some(state.transform_point(x, y + h));
+                }
+            }
+            "h" => {
+                if !path_points.is_empty() {
+                    path_points.push(path_start);
+                }
+                current_point = Some(path_start);
+            }
+            _ => {}
+        }
+    }
 
             // Path painting operators - commit the path component
             "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" => {
@@ -752,10 +820,14 @@ fn parse_into_components(
                 components.push(ContentComponent::Path {
                     operators: path_buffer.clone(),
                     bbox,
+                    is_clipping: path_buffer.iter().any(|op| {
+                        matches!(op.operator.as_str(), "W" | "W*")
+                    }),
                 });
 
                 path_buffer.clear();
                 path_points.clear();
+                current_point = None; // Path ends after painting
             }
 
             // Clipping operators - add to path buffer
@@ -763,10 +835,27 @@ fn parse_into_components(
                 path_buffer.push(op.clone());
             }
 
-            // End path without painting - discard
+            // End path without painting - keep if it sets a clipping path
             "n" => {
+                let has_clip = path_buffer
+                    .iter()
+                    .any(|op| matches!(op.operator.as_str(), "W" | "W*"));
+                if has_clip {
+                    path_buffer.push(op.clone()); // Preserve the path terminator
+                    let bbox = if path_points.is_empty() {
+                        None
+                    } else {
+                        calculate_path_bbox(&path_points)
+                    };
+                    components.push(ContentComponent::Path {
+                        operators: path_buffer.clone(),
+                        bbox,
+                        is_clipping: true,
+                    });
+                }
                 path_buffer.clear();
                 path_points.clear();
+                current_point = None;
             }
 
             // XObject operator (Do)
@@ -1045,6 +1134,76 @@ fn calculate_path_bbox(points: &[(f64, f64)]) -> Option<BoundingBox> {
         .fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     BoundingBox::new(min_x, min_y, max_x, max_y).ok()
+}
+
+/// Extend path point set with cubic Bezier control/extrema to build an accurate bbox
+fn extend_path_with_cubic_points(
+    points: &mut Vec<(f64, f64)>,
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+) {
+    // Include endpoint (start point is already present in the path)
+    points.push(p3);
+
+    // Include extrema along X and Y (solve derivative=0)
+    for t in cubic_extrema_1d(p0.0, p1.0, p2.0, p3.0) {
+        points.push(eval_cubic(p0, p1, p2, p3, t));
+    }
+    for t in cubic_extrema_1d(p0.1, p1.1, p2.1, p3.1) {
+        points.push(eval_cubic(p0, p1, p2, p3, t));
+    }
+}
+
+fn cubic_extrema_1d(p0: f64, p1: f64, p2: f64, p3: f64) -> Vec<f64> {
+    // Coefficients for derivative of cubic Bezier
+    let a = -p0 + 3.0 * p1 - 3.0 * p2 + p3;
+    let b = 2.0 * (p0 - 2.0 * p1 + p2);
+    let c = p1 - p0;
+
+    let mut ts = Vec::new();
+    const EPS: f64 = 1e-9;
+
+    if a.abs() < EPS {
+        if b.abs() > EPS {
+            let t = -c / b;
+            if (0.0..=1.0).contains(&t) {
+                ts.push(t);
+            }
+        }
+    } else {
+        let disc = b * b - 4.0 * a * c;
+        if disc >= 0.0 {
+            let sqrt_disc = disc.sqrt();
+            let t1 = (-b + sqrt_disc) / (2.0 * a);
+            let t2 = (-b - sqrt_disc) / (2.0 * a);
+            for t in [t1, t2] {
+                if (0.0..=1.0).contains(&t) {
+                    ts.push(t);
+                }
+            }
+        }
+    }
+
+    ts
+}
+
+fn eval_cubic(p0: (f64, f64), p1: (f64, f64), p2: (f64, f64), p3: (f64, f64), t: f64) -> (f64, f64) {
+    let mt = 1.0 - t;
+    let mt2 = mt * mt;
+    let t2 = t * t;
+
+    let x = mt2 * mt * p0.0
+        + 3.0 * mt2 * t * p1.0
+        + 3.0 * mt * t2 * p2.0
+        + t2 * t * p3.0;
+    let y = mt2 * mt * p0.1
+        + 3.0 * mt2 * t * p1.1
+        + 3.0 * mt * t2 * p2.1
+        + t2 * t * p3.1;
+
+    (x, y)
 }
 
 fn handle_orphan_text_operation(
@@ -1372,6 +1531,7 @@ fn get_xobject_type(doc: &Document, resources: &Dictionary, xobj_name: &[u8]) ->
 /// Filter components based on bbox overlap with crop box
 fn filter_components(components: Vec<ContentComponent>, crop_box: &BoundingBox) -> Vec<Operation> {
     const SAFETY_MARGIN: f64 = 15.0; // Points to add around crop box for safety
+    const CLIP_MARGIN: f64 = 2.0; // Small cushion for clip paths to account for numeric/curve bounds
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -1459,8 +1619,42 @@ fn filter_components(components: Vec<ContentComponent>, crop_box: &BoundingBox) 
             }
 
             // Filter paths based on bbox overlap
-            ContentComponent::Path { operators, bbox } => {
+            ContentComponent::Path {
+                operators,
+                bbox,
+                is_clipping,
+            } => {
                 stats.paths_total += 1;
+                if is_clipping {
+                    if let Some(path_bbox) = bbox {
+                        if has_overlap(&path_bbox, crop_box, CLIP_MARGIN) {
+                            stats.paths_kept += 1;
+                            output.extend(operators);
+                        } else {
+                            #[cfg(target_arch = "wasm32")]
+                            {
+                                use wasm_bindgen::JsValue;
+                                web_sys::console::log_1(&JsValue::from_str(&format!(
+                                    "[DEBUG] Removing clipping path outside bbox: ({:.2}, {:.2}, {:.2}, {:.2})",
+                                    path_bbox.left,
+                                    path_bbox.bottom,
+                                    path_bbox.right,
+                                    path_bbox.top
+                                )));
+                            }
+                            #[cfg(not(target_arch = "wasm32"))]
+                            eprintln!(
+                                "[DEBUG] Removing clipping path outside bbox: ({:.1}, {:.1}, {:.1}, {:.1})",
+                                path_bbox.left, path_bbox.bottom, path_bbox.right, path_bbox.top
+                            );
+                        }
+                    } else {
+                        // Missing bbox - keep to avoid breaking clip stack
+                        stats.paths_kept += 1;
+                        output.extend(operators);
+                    }
+                    continue;
+                }
                 if let Some(path_bbox) = bbox {
                     if has_overlap(&path_bbox, crop_box, SAFETY_MARGIN) {
                         stats.paths_kept += 1;
@@ -2352,5 +2546,23 @@ mod tests {
         let real_value = extract_number(&operands, 1).unwrap();
         assert!((real_value - 3.14).abs() < 1e-6);
         assert_eq!(extract_number(&operands, 2), None);
+    }
+
+    #[test]
+    fn test_cubic_extrema_in_bbox() {
+        // Symmetric curve bulges to y≈0.75; ensure extrema are captured
+        let p0 = (0.0, 0.0);
+        let p1 = (0.0, 1.0);
+        let p2 = (1.0, 1.0);
+        let p3 = (1.0, 0.0);
+
+        let mut points = vec![p0];
+        extend_path_with_cubic_points(&mut points, p0, p1, p2, p3);
+        let bbox = calculate_path_bbox(&points).unwrap();
+
+        assert_eq!(bbox.left, 0.0);
+        assert_eq!(bbox.right, 1.0);
+        assert_eq!(bbox.bottom, 0.0);
+        assert!(bbox.top > 0.7 && bbox.top < 0.8);
     }
 }
