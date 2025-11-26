@@ -28,3 +28,7 @@ CLAUDE.local.md
 
 # PDF outputs
 *.pdf
+
+# Test directories
+.test_cache/
+.test_output/

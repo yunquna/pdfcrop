@@ -45,7 +45,7 @@ pub fn apply_cropbox(
     // This removes paths and images that don't overlap with the crop box
     // Text blocks and Form XObjects are kept for safety
     if clip_content {
-        filter_page_content(doc, page_id, bbox)?;
+        filter_page_content(doc, page_id, page_num, bbox)?;
     }
 
     Ok(())
@@ -56,8 +56,15 @@ pub fn apply_cropbox(
 /// This analyzes the page's content stream and removes drawing operations
 /// that fall completely outside the crop box. This ensures clipped content
 /// is actually removed from the PDF file for privacy/security.
-fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingBox) -> Result<()> {
-    use crate::content_filter::filter_content_stream;
+fn filter_page_content(
+    doc: &mut Document,
+    page_id: (u32, u16),
+    page_num: usize,
+    bbox: &BoundingBox,
+) -> Result<()> {
+    use crate::content_filter::{
+        filter_content_stream, filter_form_xobject, FormFilterTask, TextRenderFallback,
+    };
 
     #[cfg(target_arch = "wasm32")]
     {
@@ -77,7 +84,8 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
         let resources = page
             .get(b"Resources")
             .ok()
-            .and_then(|obj| obj.as_dict().ok()).cloned();
+            .and_then(|obj| obj.as_dict().ok())
+            .cloned();
 
         // Clone the Contents reference
         let contents_ref = match page.get(b"Contents") {
@@ -91,8 +99,21 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
         (contents_ref, resources)
     };
 
+    // Build a per-page render fallback using the current document bytes.
+    let mut render_fallback = {
+        let mut bytes = Vec::new();
+        if let Err(e) = doc.save_to(&mut bytes) {
+            #[cfg(not(target_arch = "wasm32"))]
+            eprintln!("[DEBUG] Could not serialize PDF for render fallback: {}", e);
+            None
+        } else {
+            TextRenderFallback::new(bytes, page_num).ok()
+        }
+    };
+
     // Collect all Form XObjects to filter
-    let mut all_form_xobjects = vec![];
+    let mut all_form_xobjects: Vec<FormFilterTask> = vec![];
+    const IDENTITY_CTM: [f64; 6] = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
 
     // Handle both single stream and array of streams
     match contents_ref {
@@ -105,8 +126,15 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
                 .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
 
             // Filter the content stream (collects Form XObjects for second pass)
-            let (filtered_content, form_xobjects) =
-                filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
+            let (filtered_content, form_xobjects) = filter_content_stream(
+                doc,
+                stream,
+                resources.as_ref(),
+                bbox,
+                &IDENTITY_CTM,
+                &mut render_fallback,
+                false,
+            )?;
             all_form_xobjects.extend(form_xobjects);
 
             // Update the stream with filtered content
@@ -119,30 +147,31 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
             stream_mut.set_plain_content(filtered_content);
         }
         Object::Array(ref streams) => {
-            // Multiple content streams - filter ALL of them
+            // Multiple content streams - MUST concatenate before filtering!
+            // PDF spec says these streams are concatenated, and operations can span
+            // stream boundaries (e.g., one stream ends with [(text) and next has ] TJ)
             #[cfg(target_arch = "wasm32")]
             {
                 use wasm_bindgen::JsValue;
                 web_sys::console::log_1(&JsValue::from_str(&format!(
-                    "[DEBUG] Page has {} content streams",
+                    "[DEBUG] Page has {} content streams - concatenating before filter",
                     streams.len()
                 )));
             }
 
             #[cfg(debug_assertions)]
-            eprintln!("[DEBUG] Page has {} content streams (array)", streams.len());
+            eprintln!(
+                "[DEBUG] Page has {} content streams (array) - concatenating",
+                streams.len()
+            );
 
-            for (_idx, stream_ref) in streams.iter().enumerate() {
+            // Collect all stream references and concatenate their decoded content
+            let mut stream_refs: Vec<lopdf::ObjectId> = Vec::new();
+            let mut concatenated_bytes: Vec<u8> = Vec::new();
+
+            for stream_ref in streams.iter() {
                 if let Object::Reference(ref_id) = stream_ref {
-                    #[cfg(target_arch = "wasm32")]
-                    {
-                        use wasm_bindgen::JsValue;
-                        web_sys::console::log_1(&JsValue::from_str(&format!(
-                            "[DEBUG] Filtering content stream {} of {}",
-                            _idx + 1,
-                            streams.len()
-                        )));
-                    }
+                    stream_refs.push(*ref_id);
 
                     let stream = doc
                         .get_object(*ref_id)
@@ -150,17 +179,56 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
                         .as_stream()
                         .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
 
-                    let (filtered_content, form_xobjects) =
-                        filter_content_stream(doc, stream, resources.as_ref(), bbox)?;
-                    all_form_xobjects.extend(form_xobjects);
+                    let decoded = stream
+                        .decompressed_content()
+                        .map_err(|e| Error::PdfParse(format!("Failed to decode stream: {}", e)))?;
 
-                    let stream_mut = doc
-                        .get_object_mut(*ref_id)
-                        .map_err(|e| Error::PdfParse(format!("failed to get stream mut: {}", e)))?
-                        .as_stream_mut()
-                        .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+                    // Add newline separator between streams to ensure operators don't merge
+                    if !concatenated_bytes.is_empty() {
+                        concatenated_bytes.push(b'\n');
+                    }
+                    concatenated_bytes.extend_from_slice(&decoded);
+                }
+            }
 
-                    stream_mut.set_plain_content(filtered_content);
+            if stream_refs.is_empty() {
+                return Err(Error::PdfParse("No valid stream references in array".to_string()));
+            }
+
+            // Create a temporary stream object for filtering
+            // The bytes are already decoded, so we create an uncompressed stream
+            let mut temp_dict = lopdf::Dictionary::new();
+            temp_dict.set("Length", Object::Integer(concatenated_bytes.len() as i64));
+            let mut temp_stream = lopdf::Stream::new(temp_dict, concatenated_bytes);
+            // Mark as already decompressed by setting allows_compression = false
+            temp_stream.allows_compression = false;
+
+            // Filter the concatenated content
+            let (filtered_content, form_xobjects) = filter_content_stream(
+                doc,
+                &temp_stream,
+                resources.as_ref(),
+                bbox,
+                &IDENTITY_CTM,
+                &mut render_fallback,
+                false,
+            )?;
+            all_form_xobjects.extend(form_xobjects);
+
+            // Put all filtered content in the first stream, clear others
+            for (idx, ref_id) in stream_refs.iter().enumerate() {
+                let stream_mut = doc
+                    .get_object_mut(*ref_id)
+                    .map_err(|e| Error::PdfParse(format!("failed to get stream mut: {}", e)))?
+                    .as_stream_mut()
+                    .map_err(|e| Error::PdfParse(format!("object is not a stream: {}", e)))?;
+
+                if idx == 0 {
+                    // First stream gets all the filtered content
+                    stream_mut.set_plain_content(filtered_content.clone());
+                } else {
+                    // Other streams are cleared (they'll be empty but still valid)
+                    stream_mut.set_plain_content(Vec::new());
                 }
             }
         }
@@ -172,37 +240,25 @@ fn filter_page_content(doc: &mut Document, page_id: (u32, u16), bbox: &BoundingB
     }
 
     // Second pass: Recursively filter all collected Form XObjects
-    // DISABLED: Form XObjects have their own coordinate system which doesn't match page coordinates
-    // Filtering them with page bbox causes incorrect content removal
-    // TODO: Implement coordinate transformation from page space to XObject space
-    #[cfg(target_arch = "wasm32")]
-    {
-        use wasm_bindgen::JsValue;
-        web_sys::console::log_1(&JsValue::from_str(&format!(
-            "[DEBUG] Skipping Form XObject filtering ({} found) - coordinate transformation not yet implemented",
-            all_form_xobjects.len()
-        )));
+    while let Some(task) = all_form_xobjects.pop() {
+        match filter_form_xobject(doc, task, bbox, &mut render_fallback) {
+            Ok(nested_xobjects) => {
+                all_form_xobjects.extend(nested_xobjects);
+            }
+            Err(e) => {
+                #[cfg(target_arch = "wasm32")]
+                {
+                    use wasm_bindgen::JsValue;
+                    web_sys::console::log_1(&JsValue::from_str(&format!(
+                        "[DEBUG] Could not filter Form XObject: {}",
+                        e
+                    )));
+                }
+                #[cfg(not(target_arch = "wasm32"))]
+                eprintln!("[DEBUG] Could not filter Form XObject: {}", e);
+            }
+        }
     }
-
-    // NOTE: Commented out Form XObject filtering for now
-    // while let Some((xobj_id, xobj_resources)) = all_form_xobjects.pop() {
-    //     match filter_form_xobject(doc, xobj_id, xobj_resources, bbox) {
-    //         Ok(nested_xobjects) => {
-    //             // Add nested Form XObjects to the queue for recursive filtering
-    //             all_form_xobjects.extend(nested_xobjects);
-    //         }
-    //         Err(e) => {
-    //             #[cfg(target_arch = "wasm32")]
-    //             {
-    //                 use wasm_bindgen::JsValue;
-    //                 web_sys::console::log_1(&JsValue::from_str(&format!(
-    //                     "[DEBUG] Could not filter Form XObject {:?}: {}",
-    //                     xobj_id, e
-    //                 )));
-    //             }
-    //         }
-    //     }
-    // }
 
     #[cfg(target_arch = "wasm32")]
     {
