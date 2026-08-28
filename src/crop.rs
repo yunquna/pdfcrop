@@ -2,9 +2,46 @@
 
 use crate::bbox::{detect_bbox, BoundingBox};
 use crate::error::{Error, Result};
-use crate::pdf_ops::{apply_cropbox, get_page_count, get_page_dimensions};
-use crate::CropOptions;
+use crate::pdf_ops::{apply_page_boxes, get_page_count, get_page_dimensions, get_page_media_box};
+use crate::{CropOptions, TargetAlignment, TargetPage};
 use lopdf::Document;
+
+/// Fit a fixed-size output rectangle around detected content without leaving the source page.
+pub fn normalize_to_target(
+    content: BoundingBox,
+    page: BoundingBox,
+    target: TargetPage,
+) -> Result<BoundingBox> {
+    if content.width() > target.width || content.height() > target.height {
+        return Err(Error::PdfParse("content exceeds target page".into()));
+    }
+    if target.width > page.width() || target.height > page.height() {
+        return Err(Error::PdfParse("target page exceeds source page".into()));
+    }
+
+    let (mut left, mut bottom) = match target.alignment {
+        TargetAlignment::ContentCenter => (
+            (content.left + content.right - target.width) / 2.0,
+            (content.bottom + content.top - target.height) / 2.0,
+        ),
+        TargetAlignment::TopLeft => (content.left, content.top - target.height),
+    };
+
+    left = left.clamp(page.left, page.right - target.width);
+    bottom = bottom.clamp(page.bottom, page.top - target.height);
+    BoundingBox::new(left, bottom, left + target.width, bottom + target.height)
+}
+
+fn ensure_within_deadline(
+    started_at: &web_time::Instant,
+    max_processing_ms: Option<u64>,
+) -> Result<()> {
+    if max_processing_ms.is_some_and(|limit| started_at.elapsed().as_millis() >= u128::from(limit))
+    {
+        return Err(Error::PdfParse("processing deadline exceeded".into()));
+    }
+    Ok(())
+}
 
 /// Crop a PDF file according to the specified options
 ///
@@ -33,6 +70,7 @@ use lopdf::Document;
 /// # }
 /// ```
 pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
+    let started_at = web_time::Instant::now();
     // Debug logging at the very start
     #[cfg(target_arch = "wasm32")]
     {
@@ -91,7 +129,8 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
             .map(|&page_num| {
                 (
                     page_num,
-                    bbox_detection_task(pdf_data, &doc, page_num, &options),
+                    ensure_within_deadline(&started_at, options.max_processing_ms)
+                        .and_then(|_| bbox_detection_task(pdf_data, &doc, page_num, &options)),
                 )
             })
             .collect::<Vec<_>>()
@@ -104,13 +143,16 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         .map(|&page_num| {
             (
                 page_num,
-                bbox_detection_task(pdf_data, &doc, page_num, &options),
+                ensure_within_deadline(&started_at, options.max_processing_ms)
+                    .and_then(|_| bbox_detection_task(pdf_data, &doc, page_num, &options)),
             )
         })
         .collect::<Vec<_>>();
 
     // Phase 2: Apply cropboxes sequentially (mutates document, must be sequential)
     for (page_num, bbox_result) in bbox_results.iter() {
+        ensure_within_deadline(&started_at, options.max_processing_ms)?;
+
         // Extract bbox from result (propagate errors)
         let (final_bbox, is_manual) = bbox_result.as_ref().map_err(|e| {
             Error::PdfParse(format!(
@@ -146,8 +188,24 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
             eprintln!("  Skipping clipping (auto-detected bbox - fast track)");
         }
 
-        // Apply the crop box (with optional content clipping)
-        apply_cropbox(&mut doc, *page_num, final_bbox, should_clip)?;
+        let output_bbox = if let Some(target_page) = options.target_page {
+            normalize_to_target(
+                *final_bbox,
+                get_page_media_box(&doc, *page_num)?,
+                target_page,
+            )?
+        } else {
+            *final_bbox
+        };
+
+        // Apply the selected page-box policy (with optional content clipping).
+        apply_page_boxes(
+            &mut doc,
+            *page_num,
+            &output_bbox,
+            options.page_box_policy,
+            should_clip,
+        )?;
     }
 
     // Phase 3: Remove pages that weren't in the page range (if page range was specified)

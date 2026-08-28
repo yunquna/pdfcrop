@@ -33,6 +33,7 @@ rayon = { version = "1.10", optional = true }
 hayro = "0.4"
 hayro-interpret = "0.4"
 vello_cpu = { version = "0.0.4", default-features = false, features = ["std", "png"] }
+web-time = "1"
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

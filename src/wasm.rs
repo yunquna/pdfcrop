@@ -213,6 +213,7 @@ pub fn crop_pdf_wasm(
         verbose: options.verbose,
         clip_content: options.clip_content,
         shrink_to_content: options.shrink_to_content,
+        ..Default::default()
     };
 
     // Perform the crop
