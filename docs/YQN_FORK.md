@@ -30,10 +30,12 @@ patching Hayro.
 WASM builds disable the default Rayon feature:
 
 ```bash
-rustup run 1.88.0 wasm-pack build --target nodejs --out-dir pkg-node --release -- \
+PATH="$(dirname "$(rustup which --toolchain 1.88.0 rustc)"):$PATH" \
+  wasm-pack build --target nodejs --out-dir pkg-node --release --no-opt -- \
   --no-default-features --features std
 node tests/node-smoke.cjs
-rustup run 1.88.0 wasm-pack build --target bundler --out-dir pkg-worker --release -- \
+PATH="$(dirname "$(rustup which --toolchain 1.88.0 rustc)"):$PATH" \
+  wasm-pack build --target bundler --out-dir pkg-worker --release --no-opt -- \
   --no-default-features --features std
 node scripts/prepare-yqn-package.mjs pkg-worker
 ```
@@ -59,3 +61,9 @@ package `@yunquna/pdfcrop-wasm`. This fork does not publish to npm in V1.
 - `v0.1.1-yqn.2` keeps the project on Rust 1.88 and installs the official
   precompiled `wasm-pack 0.15.0` binary through `taiki-e/install-action`; this
   avoids compiling build tooling with the project toolchain.
+- `v0.1.1-yqn.2` then reached Node smoke but Ubuntu's older `wasm-opt` produced
+  an invalid externref table for the Node-only smoke package. No Release or
+  artifact was created.
+- `v0.1.1-yqn.3` disables wasm-pack's automatic optimization for both generated
+  packages. Node smoke remains unoptimized; the Worker package receives exactly
+  one explicit `wasm-opt -Oz` pass before packing.
