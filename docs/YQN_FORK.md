@@ -49,8 +49,7 @@ package `@yunquna/pdfcrop-wasm`. This fork does not publish to npm in V1.
 - Node smoke: passed with one synthetic in-memory PDF;
 - bundler WASM: 3,818,642 bytes; gzip level 9: 1,536,413 bytes;
 - local npm tarball: 1,544,730 bytes;
-- release URL/source commit/release SHA-256 remain pending until the feature PR is
-  reviewed, merged and tagged. Local tarball hashes are not release evidence.
+- local tarball hashes are diagnostic only and are not release evidence.
 
 ## Release attempts
 
@@ -66,4 +65,15 @@ package `@yunquna/pdfcrop-wasm`. This fork does not publish to npm in V1.
   artifact was created.
 - `v0.1.1-yqn.3` disables wasm-pack's automatic optimization for both generated
   packages. Node smoke remains unoptimized; the Worker package receives exactly
-  one explicit `wasm-opt -Oz` pass before packing.
+  one explicit `wasm-opt -Oz` pass before packing. This release completed.
+
+## Verified release evidence
+
+- Release: <https://github.com/yunquna/pdfcrop/releases/tag/v0.1.1-yqn.3>
+- Workflow: <https://github.com/yunquna/pdfcrop/actions/runs/33144814158>
+- Source commit: `04f1ff990ddc7364cecfd22abc7b5b8fa79cbf84`
+- Package: `yunquna-pdfcrop-wasm-0.1.1-yqn.3.tgz` (1,541,148 bytes)
+- SHA-256: `d6fe0f47ce4b3f475fed53b032a3cb82e22543ee0ad353dec6889039734a1b42`
+- The downloaded tarball hash matches the published `SHA256SUMS` file and the
+  GitHub asset digest.
+- Release status: prerelease; npm registry publication remains out of scope.
