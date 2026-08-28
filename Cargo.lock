@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "pdfcrop"
-version = "0.1.1-yqn.1"
+version = "0.1.1-yqn.2"
 dependencies = [
  "anyhow",
  "clap",

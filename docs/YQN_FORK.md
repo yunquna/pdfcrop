@@ -49,3 +49,13 @@ package `@yunquna/pdfcrop-wasm`. This fork does not publish to npm in V1.
 - local npm tarball: 1,544,730 bytes;
 - release URL/source commit/release SHA-256 remain pending until the feature PR is
   reviewed, merged and tagged. Local tarball hashes are not release evidence.
+
+## Release attempts
+
+- `v0.1.1-yqn.1` points to the first stable YQN main baseline. Its workflow
+  stopped before build because crates.io installation of `wasm-pack 0.15.0`
+  resolved a tool-only dependency requiring Rust 1.91. No GitHub Release or
+  artifact was created.
+- `v0.1.1-yqn.2` keeps the project on Rust 1.88 and installs the official
+  precompiled `wasm-pack 0.15.0` binary through `taiki-e/install-action`; this
+  avoids compiling build tooling with the project toolchain.
