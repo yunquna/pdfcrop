@@ -30,11 +30,6 @@ jobs:
         with:
           tool: wasm-pack@0.15.0
 
-      - name: Install Binaryen
-        run: |
-          sudo apt-get update
-          sudo apt-get install --yes binaryen
-
       - name: Verify source and tests
         run: |
           rustfmt --check --config skip_children=true \
@@ -57,10 +52,8 @@ jobs:
         run: |
           wasm-pack build --target bundler --out-dir pkg-worker --release --no-opt -- \
             --no-default-features --features std
-          wasm-opt -Oz pkg-worker/pdfcrop_bg.wasm \
-            -o pkg-worker/pdfcrop_bg.optimized.wasm
-          mv pkg-worker/pdfcrop_bg.optimized.wasm pkg-worker/pdfcrop_bg.wasm
           node scripts/prepare-yqn-package.mjs pkg-worker
+          node --experimental-wasm-modules tests/worker-smoke.mjs
 
       - name: Pack and checksum
         run: |
