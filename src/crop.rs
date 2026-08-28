@@ -6,6 +6,23 @@ use crate::pdf_ops::{apply_page_boxes, get_page_count, get_page_dimensions, get_
 use crate::{CropOptions, TargetAlignment, TargetPage};
 use lopdf::Document;
 
+/// Detected content bounds and their source-page identity.
+#[derive(Debug)]
+pub struct PageDetectedBounds {
+    pub source_page_index: usize,
+    pub bounds: BoundingBox,
+}
+
+/// Technical result returned by the structured crop API.
+#[derive(Debug)]
+pub struct CropResult {
+    pub pdf_bytes: Vec<u8>,
+    pub page_count: usize,
+    pub output_width_points: Option<f64>,
+    pub output_height_points: Option<f64>,
+    pub detected_bounds: Vec<PageDetectedBounds>,
+}
+
 /// Fit a fixed-size output rectangle around detected content without leaving the source page.
 pub fn normalize_to_target(
     content: BoundingBox,
@@ -70,6 +87,11 @@ fn ensure_within_deadline(
 /// # }
 /// ```
 pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
+    Ok(crop_pdf_with_result(pdf_data, options)?.pdf_bytes)
+}
+
+/// Crop a PDF and retain the technical facts required by service adapters.
+pub fn crop_pdf_with_result(pdf_data: &[u8], options: CropOptions) -> Result<CropResult> {
     let started_at = web_time::Instant::now();
     // Debug logging at the very start
     #[cfg(target_arch = "wasm32")]
@@ -149,6 +171,9 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         })
         .collect::<Vec<_>>();
 
+    let mut detected_bounds = Vec::with_capacity(bbox_results.len());
+    let mut output_bounds = Vec::with_capacity(bbox_results.len());
+
     // Phase 2: Apply cropboxes sequentially (mutates document, must be sequential)
     for (page_num, bbox_result) in bbox_results.iter() {
         ensure_within_deadline(&started_at, options.max_processing_ms)?;
@@ -197,6 +222,11 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
         } else {
             *final_bbox
         };
+        detected_bounds.push(PageDetectedBounds {
+            source_page_index: *page_num,
+            bounds: *final_bbox,
+        });
+        output_bounds.push(output_bbox);
 
         // Apply the selected page-box policy (with optional content clipping).
         apply_page_boxes(
@@ -294,7 +324,22 @@ pub fn crop_pdf(pdf_data: &[u8], options: CropOptions) -> Result<Vec<u8>> {
     let mut output = Vec::new();
     doc.save_to(&mut output)?;
 
-    Ok(output)
+    let (output_width_points, output_height_points) = if options.target_page.is_some() {
+        output_bounds
+            .first()
+            .map(|bbox| (Some(bbox.width()), Some(bbox.height())))
+            .unwrap_or((None, None))
+    } else {
+        (None, None)
+    };
+
+    Ok(CropResult {
+        pdf_bytes: output,
+        page_count: get_page_count(&doc),
+        output_width_points,
+        output_height_points,
+        detected_bounds,
+    })
 }
 
 /// Bbox detection task (extracted for reuse in parallel and sequential modes)

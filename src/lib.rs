@@ -42,7 +42,9 @@ pub mod pdf_ops;
 pub mod wasm;
 
 pub use bbox::{detect_bbox, BoundingBox};
-pub use crop::{crop_pdf, normalize_to_target};
+pub use crop::{
+    crop_pdf, crop_pdf_with_result, normalize_to_target, CropResult, PageDetectedBounds,
+};
 pub use error::{Error, Result};
 pub use margins::Margins;
 
