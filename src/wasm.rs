@@ -2,11 +2,33 @@
 //!
 //! This module provides JavaScript-accessible functions for PDF cropping in web browsers.
 
-use js_sys::{Array, Object};
+use js_sys::{Array, Object, Reflect, Uint8Array};
 use std::collections::HashMap;
 use wasm_bindgen::prelude::*;
 
-use crate::{crop_pdf, BBoxMethod, BoundingBox, CropOptions, Margins, PageRange};
+use crate::{
+    crop_pdf, crop_pdf_with_result, BBoxMethod, BoundingBox, CropOptions, Margins, PageBoxPolicy,
+    PageRange, TargetAlignment, TargetPage,
+};
+
+#[wasm_bindgen(typescript_custom_section)]
+const TYPESCRIPT_TYPES: &'static str = r#"
+export interface CropDetectedBounds {
+  sourcePageIndex: number;
+  left: number;
+  bottom: number;
+  right: number;
+  top: number;
+}
+
+export interface CropPdfResult {
+  pdfBytes: Uint8Array;
+  pageCount: number;
+  outputWidthPoints: number | null;
+  outputHeightPoints: number | null;
+  detectedBounds: CropDetectedBounds[];
+}
+"#;
 
 /// Initialize panic hook for better error messages in browser console
 #[wasm_bindgen(start)]
@@ -69,6 +91,20 @@ impl From<BoundingBox> for WasmBoundingBox {
     }
 }
 
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub enum WasmPageBoxPolicy {
+    CropOnly = 0,
+    Physical = 1,
+}
+
+#[wasm_bindgen]
+#[derive(Debug, Clone, Copy)]
+pub enum WasmTargetAlignment {
+    ContentCenter = 0,
+    TopLeft = 1,
+}
+
 /// WASM-friendly crop options
 #[wasm_bindgen]
 pub struct WasmCropOptions {
@@ -79,6 +115,9 @@ pub struct WasmCropOptions {
     verbose: bool,
     clip_content: bool,
     shrink_to_content: bool,
+    page_box_policy: PageBoxPolicy,
+    target_page: Option<TargetPage>,
+    max_processing_ms: Option<u64>,
 }
 
 #[wasm_bindgen]
@@ -93,6 +132,9 @@ impl WasmCropOptions {
             verbose: false,
             clip_content: false,
             shrink_to_content: false,
+            page_box_policy: PageBoxPolicy::CropOnly,
+            target_page: None,
+            max_processing_ms: None,
         }
     }
 
@@ -128,6 +170,37 @@ impl WasmCropOptions {
     pub fn set_shrink_to_content(&mut self, shrink: bool) {
         self.shrink_to_content = shrink;
     }
+
+    #[wasm_bindgen(js_name = setPageBoxPolicy)]
+    pub fn set_page_box_policy(&mut self, policy: WasmPageBoxPolicy) {
+        self.page_box_policy = match policy {
+            WasmPageBoxPolicy::CropOnly => PageBoxPolicy::CropOnly,
+            WasmPageBoxPolicy::Physical => PageBoxPolicy::Physical,
+        };
+    }
+
+    #[wasm_bindgen(js_name = setTargetPage)]
+    pub fn set_target_page(
+        &mut self,
+        width: f64,
+        height: f64,
+        alignment: WasmTargetAlignment,
+    ) -> Result<(), JsValue> {
+        let alignment = match alignment {
+            WasmTargetAlignment::ContentCenter => TargetAlignment::ContentCenter,
+            WasmTargetAlignment::TopLeft => TargetAlignment::TopLeft,
+        };
+        self.target_page = Some(
+            TargetPage::new(width, height, alignment)
+                .map_err(|error| JsValue::from_str(&error.to_string()))?,
+        );
+        Ok(())
+    }
+
+    #[wasm_bindgen(js_name = setMaxProcessingMs)]
+    pub fn set_max_processing_ms(&mut self, max_processing_ms: u32) {
+        self.max_processing_ms = Some(u64::from(max_processing_ms));
+    }
 }
 
 /// Crop a PDF with the given options
@@ -140,13 +213,11 @@ impl WasmCropOptions {
 ///
 /// # Returns
 /// Cropped PDF as Uint8Array
-#[wasm_bindgen(js_name = cropPdf)]
-pub fn crop_pdf_wasm(
-    pdf_bytes: &[u8],
+fn build_crop_options(
     options: &WasmCropOptions,
     page_bboxes: Option<Object>,
     page_range: Option<Array>,
-) -> Result<Vec<u8>, JsValue> {
+) -> Result<CropOptions, JsValue> {
     // Convert page_bboxes from JS Map to HashMap
     let page_bboxes_map = if let Some(obj) = page_bboxes {
         let mut map = HashMap::new();
@@ -213,10 +284,100 @@ pub fn crop_pdf_wasm(
         verbose: options.verbose,
         clip_content: options.clip_content,
         shrink_to_content: options.shrink_to_content,
+        page_box_policy: options.page_box_policy,
+        target_page: options.target_page,
+        max_processing_ms: options.max_processing_ms,
     };
 
-    // Perform the crop
-    crop_pdf(pdf_bytes, crop_options).map_err(|e| JsValue::from_str(&e.to_string()))
+    Ok(crop_options)
+}
+
+#[wasm_bindgen(js_name = cropPdf)]
+pub fn crop_pdf_wasm(
+    pdf_bytes: &[u8],
+    options: &WasmCropOptions,
+    page_bboxes: Option<Object>,
+    page_range: Option<Array>,
+) -> Result<Vec<u8>, JsValue> {
+    let crop_options = build_crop_options(options, page_bboxes, page_range)?;
+    crop_pdf(pdf_bytes, crop_options).map_err(|error| JsValue::from_str(&error.to_string()))
+}
+
+#[wasm_bindgen(
+    js_name = cropPdfWithResult,
+    unchecked_return_type = "CropPdfResult"
+)]
+pub fn crop_pdf_with_result_wasm(
+    pdf_bytes: &[u8],
+    options: &WasmCropOptions,
+    page_bboxes: Option<Object>,
+    page_range: Option<Array>,
+) -> Result<JsValue, JsValue> {
+    let crop_options = build_crop_options(options, page_bboxes, page_range)?;
+    let result = crop_pdf_with_result(pdf_bytes, crop_options)
+        .map_err(|error| JsValue::from_str(&error.to_string()))?;
+
+    let value = Object::new();
+    Reflect::set(
+        &value,
+        &"pdfBytes".into(),
+        &Uint8Array::from(result.pdf_bytes.as_slice()),
+    )?;
+    Reflect::set(
+        &value,
+        &"pageCount".into(),
+        &JsValue::from_f64(result.page_count as f64),
+    )?;
+    Reflect::set(
+        &value,
+        &"outputWidthPoints".into(),
+        &result
+            .output_width_points
+            .map(JsValue::from_f64)
+            .unwrap_or(JsValue::NULL),
+    )?;
+    Reflect::set(
+        &value,
+        &"outputHeightPoints".into(),
+        &result
+            .output_height_points
+            .map(JsValue::from_f64)
+            .unwrap_or(JsValue::NULL),
+    )?;
+
+    let detected_bounds = Array::new();
+    for detected in result.detected_bounds {
+        let item = Object::new();
+        Reflect::set(
+            &item,
+            &"sourcePageIndex".into(),
+            &JsValue::from_f64(detected.source_page_index as f64),
+        )?;
+        Reflect::set(
+            &item,
+            &"left".into(),
+            &JsValue::from_f64(detected.bounds.left),
+        )?;
+        Reflect::set(
+            &item,
+            &"bottom".into(),
+            &JsValue::from_f64(detected.bounds.bottom),
+        )?;
+        Reflect::set(
+            &item,
+            &"right".into(),
+            &JsValue::from_f64(detected.bounds.right),
+        )?;
+        Reflect::set(
+            &item,
+            &"top".into(),
+            &JsValue::from_f64(detected.bounds.top),
+        )?;
+        detected_bounds.push(&item);
+    }
+    Reflect::set(&value, &"detectedBounds".into(), &detected_bounds)?;
+
+    Ok(value.into())
 }
 
 /// Get the number of pages in a PDF

@@ -1,12 +1,12 @@
 [package]
 name = "pdfcrop"
-version = "0.1.1"
+version = "0.1.1-yqn.1"
 edition = "2021"
-rust-version = "1.86"
+rust-version = "1.88"
 default-run = "pdfcrop"
 authors = ["Teddy van Jerry <me@teddy-van-jerry.org>"]
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/pdfcrop/pdfcrop"
+repository = "https://github.com/yunquna/pdfcrop"
 description = "PDF cropping library and command-line tool with rendering-based bbox detection"
 keywords = ["pdf", "crop", "margin", "bbox", "cli"]
 categories = ["multimedia", "parsing", "command-line-utilities"]
@@ -33,6 +33,7 @@ rayon = { version = "1.10", optional = true }
 hayro = "0.4"
 hayro-interpret = "0.4"
 vello_cpu = { version = "0.0.4", default-features = false, features = ["std", "png"] }
+web-time = "1"
 
 # WASM-specific dependencies
 [target.'cfg(target_arch = "wasm32")'.dependencies]

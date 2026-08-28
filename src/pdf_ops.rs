@@ -2,6 +2,7 @@
 
 use crate::bbox::BoundingBox;
 use crate::error::{Error, Result};
+use crate::PageBoxPolicy;
 use lopdf::{Document, Object};
 
 /// Apply a bounding box to a PDF page by setting its CropBox
@@ -17,6 +18,17 @@ pub fn apply_cropbox(
     bbox: &BoundingBox,
     clip_content: bool,
 ) -> Result<()> {
+    apply_page_boxes(doc, page_num, bbox, PageBoxPolicy::CropOnly, clip_content)
+}
+
+/// Apply a bounding box using an explicit PDF page-box policy.
+pub fn apply_page_boxes(
+    doc: &mut Document,
+    page_num: usize,
+    bbox: &BoundingBox,
+    policy: PageBoxPolicy,
+    clip_content: bool,
+) -> Result<()> {
     // Get the page ID
     let page_id = doc
         .page_iter()
@@ -30,16 +42,23 @@ pub fn apply_cropbox(
         .as_dict_mut()
         .map_err(|e| Error::PdfParse(format!("page {} is not a dictionary: {}", page_num, e)))?;
 
-    // Create CropBox array: [left, bottom, right, top]
-    let cropbox = Object::Array(vec![
-        Object::Real(bbox.left as f32),
-        Object::Real(bbox.bottom as f32),
-        Object::Real(bbox.right as f32),
-        Object::Real(bbox.top as f32),
-    ]);
+    let value = || {
+        Object::Array(vec![
+            Object::Real(bbox.left as f32),
+            Object::Real(bbox.bottom as f32),
+            Object::Real(bbox.right as f32),
+            Object::Real(bbox.top as f32),
+        ])
+    };
 
-    // Set the CropBox
-    page_dict.set("CropBox", cropbox);
+    match policy {
+        PageBoxPolicy::CropOnly => page_dict.set("CropBox", value()),
+        PageBoxPolicy::Physical => {
+            for key in ["MediaBox", "CropBox", "TrimBox", "BleedBox", "ArtBox"] {
+                page_dict.set(key, value());
+            }
+        }
+    }
 
     // If clip_content is enabled, filter page content using component-based approach
     // This removes paths and images that don't overlap with the crop box
@@ -192,7 +211,9 @@ fn filter_page_content(
             }
 
             if stream_refs.is_empty() {
-                return Err(Error::PdfParse("No valid stream references in array".to_string()));
+                return Err(Error::PdfParse(
+                    "No valid stream references in array".to_string(),
+                ));
             }
 
             // Create a temporary stream object for filtering
@@ -269,10 +290,8 @@ fn filter_page_content(
     Ok(())
 }
 
-/// Get the MediaBox dimensions of a page
-///
-/// MediaBox defines the boundaries of the physical medium
-pub fn get_page_dimensions(doc: &Document, page_num: usize) -> Result<(f64, f64)> {
+/// Get the MediaBox of a page.
+pub fn get_page_media_box(doc: &Document, page_num: usize) -> Result<BoundingBox> {
     let page_id = doc
         .page_iter()
         .nth(page_num)
@@ -319,10 +338,13 @@ pub fn get_page_dimensions(doc: &Document, page_num: usize) -> Result<(f64, f64)
         .or_else(|_| media_box[3].as_i64().map(|i| i as f64))
         .map_err(|e| Error::PdfParse(format!("invalid MediaBox top: {}", e)))?;
 
-    let width = right - left;
-    let height = top - bottom;
+    BoundingBox::new(left, bottom, right, top)
+}
 
-    Ok((width, height))
+/// Get the MediaBox dimensions of a page.
+pub fn get_page_dimensions(doc: &Document, page_num: usize) -> Result<(f64, f64)> {
+    let media_box = get_page_media_box(doc, page_num)?;
+    Ok((media_box.width(), media_box.height()))
 }
 
 /// Get the number of pages in a PDF document
