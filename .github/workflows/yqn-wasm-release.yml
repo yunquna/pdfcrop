@@ -26,9 +26,12 @@ jobs:
         with:
           node-version: 24
 
-      - name: Install WASM tools
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: wasm-pack@0.15.0
+
+      - name: Install Binaryen
         run: |
-          cargo install wasm-pack --locked --version 0.15.0
           sudo apt-get update
           sudo apt-get install --yes binaryen
 
