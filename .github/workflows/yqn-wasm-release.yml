@@ -49,13 +49,13 @@ jobs:
 
       - name: Build and smoke Node WASM
         run: |
-          wasm-pack build --target nodejs --out-dir pkg-node --release -- \
+          wasm-pack build --target nodejs --out-dir pkg-node --release --no-opt -- \
             --no-default-features --features std
           node tests/node-smoke.cjs
 
       - name: Build Worker package
         run: |
-          wasm-pack build --target bundler --out-dir pkg-worker --release -- \
+          wasm-pack build --target bundler --out-dir pkg-worker --release --no-opt -- \
             --no-default-features --features std
           wasm-opt -Oz pkg-worker/pdfcrop_bg.wasm \
             -o pkg-worker/pdfcrop_bg.optimized.wasm
