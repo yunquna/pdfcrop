@@ -171,6 +171,7 @@ fn main() -> Result<()> {
         verbose: args.verbose || args.debug,
         clip_content: args.clip, // Opt-in to content clipping
         shrink_to_content: args.shrink_to_content,
+        ..Default::default()
     };
 
     // Perform the crop

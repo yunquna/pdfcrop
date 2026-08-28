@@ -1,0 +1,73 @@
+name: YQN WASM Release
+
+on:
+  push:
+    tags:
+      - 'v*-yqn.*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.88.0
+          targets: wasm32-unknown-unknown
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install WASM tools
+        run: |
+          cargo install wasm-pack --locked --version 0.15.0
+          sudo apt-get update
+          sudo apt-get install --yes binaryen
+
+      - name: Verify source and tests
+        run: |
+          rustfmt --check --config skip_children=true \
+            src/lib.rs src/crop.rs src/pdf_ops.rs src/main.rs src/wasm.rs \
+            tests/target_page.rs tests/physical_crop.rs
+          cargo test --workspace
+
+      - name: Verify tag and Cargo version
+        run: |
+          CARGO_VERSION=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+          test "${GITHUB_REF_NAME}" = "v${CARGO_VERSION}"
+
+      - name: Build and smoke Node WASM
+        run: |
+          wasm-pack build --target nodejs --out-dir pkg-node --release -- \
+            --no-default-features --features std
+          node tests/node-smoke.cjs
+
+      - name: Build Worker package
+        run: |
+          wasm-pack build --target bundler --out-dir pkg-worker --release -- \
+            --no-default-features --features std
+          wasm-opt -Oz pkg-worker/pdfcrop_bg.wasm \
+            -o pkg-worker/pdfcrop_bg.optimized.wasm
+          mv pkg-worker/pdfcrop_bg.optimized.wasm pkg-worker/pdfcrop_bg.wasm
+          node scripts/prepare-yqn-package.mjs pkg-worker
+
+      - name: Pack and checksum
+        run: |
+          mkdir -p dist
+          npm pack ./pkg-worker --pack-destination dist
+          sha256sum dist/*.tgz > dist/SHA256SUMS
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          files: |
+            dist/*.tgz
+            dist/SHA256SUMS

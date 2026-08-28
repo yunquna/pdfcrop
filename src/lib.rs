@@ -42,9 +42,48 @@ pub mod pdf_ops;
 pub mod wasm;
 
 pub use bbox::{detect_bbox, BoundingBox};
-pub use crop::crop_pdf;
+pub use crop::{
+    crop_pdf, crop_pdf_with_result, normalize_to_target, CropResult, PageDetectedBounds,
+};
 pub use error::{Error, Result};
 pub use margins::Margins;
+
+/// Controls which PDF page boxes are changed by a crop operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PageBoxPolicy {
+    /// Preserve the physical page and change only CropBox.
+    CropOnly,
+    /// Make the cropped rectangle the physical page for all standard page boxes.
+    Physical,
+}
+
+/// Places detected content within a requested target page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TargetAlignment {
+    ContentCenter,
+    TopLeft,
+}
+
+/// A fixed output page size expressed in PDF points.
+#[derive(Debug, Clone, Copy)]
+pub struct TargetPage {
+    pub width: f64,
+    pub height: f64,
+    pub alignment: TargetAlignment,
+}
+
+impl TargetPage {
+    pub fn new(width: f64, height: f64, alignment: TargetAlignment) -> Result<Self> {
+        if width <= 0.0 || height <= 0.0 {
+            return Err(Error::PdfParse("target dimensions must be positive".into()));
+        }
+        Ok(Self {
+            width,
+            height,
+            alignment,
+        })
+    }
+}
 
 /// Bounding box detection method
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +185,15 @@ pub struct CropOptions {
     /// This detects the real content within the specified bbox and uses that instead
     /// Useful for removing remaining margins within a manually specified region (default: false)
     pub shrink_to_content: bool,
+
+    /// Which PDF page boxes should receive the final crop rectangle.
+    pub page_box_policy: PageBoxPolicy,
+
+    /// Optional fixed output page size and content alignment.
+    pub target_page: Option<TargetPage>,
+
+    /// Optional cooperative processing deadline in milliseconds.
+    pub max_processing_ms: Option<u64>,
 }
 
 impl Default for CropOptions {
@@ -161,6 +209,9 @@ impl Default for CropOptions {
             verbose: false,
             clip_content: false, // Default: only set CropBox (standard PDF cropping behavior)
             shrink_to_content: false, // Default: don't auto-shrink manual bbox
+            page_box_policy: PageBoxPolicy::CropOnly,
+            target_page: None,
+            max_processing_ms: None,
         }
     }
 }
